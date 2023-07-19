@@ -1,3 +1,9 @@
 [submodule "scikit_tt"]
 	path = scikit_tt
 	url = git@github.com:mbaddar1/scikit_tt.git
+
+
+[submodule "GMSOC"]
+	path = GMSOC
+	url = git@github.com:DavidSommer94/GMSOC.git
+	branch = lnode

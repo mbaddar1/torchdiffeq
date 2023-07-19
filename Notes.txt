@@ -1,0 +1,3 @@
+add submodule tracking a branch
+
+https://www.activestate.com/blog/getting-git-submodule-track-branch/

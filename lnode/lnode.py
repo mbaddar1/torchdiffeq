@@ -51,8 +51,6 @@ else:
     from torchdiffeq import odeint
 
 
-
-
 def trace_df_dz(f, z):
     """Calculates the trace of the Jacobian df/dz.
     Stolen from: https://github.com/rtqichen/ffjord/blob/master/lib/layers/odefunc.py#L13
@@ -122,10 +120,11 @@ if __name__ == '__main__':
     time_stamp = datetime.now().isoformat()
     # -------
     # Model
-    func = CNF(in_out_dim=in_out_dim, hidden_dim=args.hidden_dim, width=args.width,device=device)
+    func = CNF(in_out_dim=in_out_dim, hidden_dim=args.hidden_dim, width=args.width, device=device)
     optimizer = optim.Adam(func.parameters(), lr=args.lr)
     p_z0 = base_distribution
     loss_meter = RunningAverageMeter()
+    loss_curve = []
 
     if args.train_dir is not None:
         if not os.path.exists(args.train_dir):
@@ -164,6 +163,7 @@ if __name__ == '__main__':
             else:
                 raise ValueError(f"Unknown trajectory optimization : {args.trajectory_opt_method}")
             loss_meter.update(loss.item())
+            loss_curve.append(loss_meter.avg)
             print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss_meter.avg))
         logger.info('Finished training, dumping experiment results')
         results = dict()
@@ -176,7 +176,8 @@ if __name__ == '__main__':
         results['loss'] = loss_meter.avg
         results['args'] = vars(args)
         results['model'] = func.state_dict()
-        artifact_version_name = f'{time_stamp}_target_distribution{str(target_distribution)}_niters_{args.niters}'
+        results['loss_curve'] = loss_curve
+        artifact_version_name = f'{time_stamp}_dist_{target_distribution.__class__.__name__}_d_{in_out_dim}_niters_{args.niters}'
         pickle.dump(obj=results, file=open(f'artifacts/{args.trajectory_opt}_{artifact_version_name}.pkl', "wb"))
 
     except KeyboardInterrupt:

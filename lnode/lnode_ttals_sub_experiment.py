@@ -36,8 +36,8 @@ if __name__ == '__main__':
     trajectory_model = CNF(in_out_dim=dim, hidden_dim=hidden_dim, width=width,device=device)
     trajectory_model.load_state_dict(meta_data['model'])
 
-    # 1. verify normality of generated data
-    ## Generate samples out of the loaded model and meta-data
+    # Verify normality of generated data
+    ## 1. Generate samples out of the loaded model and meta-data
     z0 = meta_data['base_distribution'].sample(torch.Size([N_SAMPLES])).to(device)
     logp_diff_t0 = torch.zeros(N_SAMPLES, 1).type(torch.float32).to(device)
     t0 = meta_data['args']['t0']
@@ -45,6 +45,6 @@ if __name__ == '__main__':
     t_vals = torch.tensor(list(np.arange(t0, tN + 1, 1)))
     u = odeint(func=trajectory_model, y0=(z0,logp_diff_t0), t=t_vals)
     x=10
-    # # 2. verify parameters of generated data
+    ##2. verify parameters of generated data
     # logger.info(f'Sub-experiment finished')
 

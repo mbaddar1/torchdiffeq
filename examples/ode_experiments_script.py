@@ -2,21 +2,26 @@ import os
 import argparse
 import time
 import numpy as np
-
+import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
 
+SEED = 42
+torch.manual_seed(SEED)
+random.seed(SEED)
+np.random.seed(SEED)
+###
 parser = argparse.ArgumentParser('ODE demo')
 parser.add_argument('--method', type=str, choices=['dopri5', 'adams'], default='dopri5')
 parser.add_argument('--data_size', type=int, default=1000)
-parser.add_argument('--batch_time', type=int, default=50)
-parser.add_argument('--batch_size', type=int, default=300)
-parser.add_argument('--niters', type=int, default=2000)
-parser.add_argument('--test_freq', type=int, default=20)
+parser.add_argument('--batch_time', type=int, default=10)
+parser.add_argument('--batch_size', type=int, default=20)
+parser.add_argument('--niters', type=int, default=10000)
+parser.add_argument('--test_freq', type=int, default=10)
 parser.add_argument('--viz', action='store_true')
 parser.add_argument('--gpu', type=int, default=0)
-parser.add_argument('--adjoint', action='store_true')
+parser.add_argument('--adjoint', default=False, action='store_true')
 args = parser.parse_args()
 
 if args.adjoint:
@@ -24,8 +29,8 @@ if args.adjoint:
 else:
     from torchdiffeq import odeint
 
-# device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
-device = torch.device("cpu")
+device = torch.device('cuda:' + str(args.gpu) if torch.cuda.is_available() else 'cpu')
+
 true_y0 = torch.tensor([[2., 0.]]).to(device)
 t = torch.linspace(0., 25., args.data_size).to(device)
 true_A = torch.tensor([[-0.1, 2.0], [-2.0, -0.1]]).to(device)
@@ -35,10 +40,32 @@ class Lambda(nn.Module):
 
     def forward(self, t, y):
         return torch.mm(y ** 3, true_A)
+        # vdp
+        mio = 1.0
 
+
+class LambdaFVDP(nn.Module):
+    def __init__(self, *args, **kwargs):
+        # https://en.wikipedia.org/wiki/Van_der_Pol_oscillator
+        self.mio = 1.0  # 8.53
+        self.a = 1.2  # 1.2
+        self.omega = 2.0 * torch.pi / 10
+        super().__init__(*args, **kwargs)
+
+    def forward(self, t, y):
+        y1 = y[:, 0]
+        y2 = y[:, 1]
+        y1_dot = y2.view(-1, 1)
+        y2_dot = (self.mio * (1 - y1 ** 2) * y2 - y1 + self.a * torch.sin(self.omega * t)).view(-1, 1)
+        y_dot = torch.cat([y1_dot, y2_dot], dim=1)
+        return y_dot
+
+
+class LambdaLorenz(nn.Module):
+    pass
 
 with torch.no_grad():
-    true_y = odeint(Lambda(), true_y0, t, method='dopri5')
+    true_y = odeint(LambdaFVDP(), true_y0, t, method='dopri5')
 
 
 def get_batch():
@@ -127,8 +154,7 @@ class ODEFunc(nn.Module):
                 nn.init.constant_(m.bias, val=0)
 
     def forward(self, t, y):
-        # return self.net(y**3)
-        return self.net(y)
+        return self.net(y ** 3)
 
 
 class RunningAverageMeter(object):
@@ -150,15 +176,15 @@ class RunningAverageMeter(object):
         self.val = val
 
 
+# TODO
+#   1. Understand how get_batch works
+#   2. Understand how loss and loss_avg is calculated
 if __name__ == '__main__':
 
     ii = 0
 
     func = ODEFunc().to(device)
-    n_scalar = 0
-    for name,param in func.named_parameters():
-        n_scalar+=param.numel()
-    print(f'model nscaler = {n_scalar}')
+
     optimizer = optim.RMSprop(func.parameters(), lr=1e-3)
     end = time.time()
 
@@ -182,8 +208,6 @@ if __name__ == '__main__':
                 pred_y = odeint(func, true_y0, t)
                 loss = torch.mean(torch.abs(pred_y - true_y))
                 print('Iter {:04d} | Total Loss {:.6f}'.format(itr, loss.item()))
-                print('Iter {:04d} | Running Loss {:.6f}'.format(itr, loss_meter.avg))
+                print(f'loss_meter_avg = {loss_meter.avg}')
                 visualize(true_y, pred_y, func, ii)
                 ii += 1
-
-        end = time.time()

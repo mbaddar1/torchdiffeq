@@ -26,6 +26,8 @@ parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--device', type=str, choices=['cpu', 'gpu'], required=True)
 parser.add_argument('--rank', type=int, required=True)
 parser.add_argument('--degree', type=int, required=True)
+parser.add_argument('--h-index', type=int, required=True)
+parser.add_argument('--t0-index', type=int, required=True)
 args = parser.parse_args()
 if args.adjoint:
     from torchdiffeq import odeint_adjoint as odeint
@@ -43,9 +45,10 @@ logger.info(f'Device = {device}')
 
 
 def adjust_tensor_to_domain(x: torch.Tensor, domain_stripe: List[float]):
+    epsilon = 0.01
     x_min = torch.min(x, dim=0)
     x_max = torch.max(x, dim=0)
-    x_scaled = (x - x_min.values) / (x_max.values - x_min.values)
+    x_scaled = (x - x_min.values) / (x_max.values - x_min.values + epsilon)
     # FIXME, for debugging
     x_scaled_min = torch.min(x_scaled, dim=0)
     x_scaled_max = torch.max(x_scaled, dim=0)
@@ -56,14 +59,15 @@ def adjust_tensor_to_domain(x: torch.Tensor, domain_stripe: List[float]):
     return x_domain
 
 
-def run_tt_als(x: torch.Tensor, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float):
-    Dx = x.shape[1]
-    Dy = y.shape[1]
+def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float):
     N = x.shape[0]
     N_test = int(test_ratio * N)
     N_train = N - N_test
     #
-
+    x = torch.cat(tensors=[x, torch.tensor([t]).repeat(N, 1)], dim=1)
+    Dx = x.shape[1]
+    Dy = y.shape[1]
+    #
     degrees = [poly_degree] * Dx
     ranks = [1] + [rank] * (Dx - 1) + [1]
     order = len(degrees)
@@ -91,8 +95,8 @@ def run_tt_als(x: torch.Tensor, y: torch.Tensor, poly_degree: int, rank: int, te
         val_error = (torch.norm(ETT(x_domain.type(torch.float64)[N_train:, :]) -
                                 y_d.type(torch.float64)[N_train:, :]) ** 2 / torch.norm(
             y_d.type(torch.float64)[N_train:, :]) ** 2).item()
-        print('relative error on training set: ', train_error)
-        print('relative error on test set: ', val_error)
+        logger.info(f'TT-ALS Relative error on training set = {train_error}')
+        logger.info(f'TT-ALS Relative error on test set = {val_error}')
         # print('relative error on validation set: ', val_error)
         print("========================================================")
 
@@ -135,8 +139,10 @@ if __name__ == '__main__':
     logger.info(f'cov_abs_err = {cov_abs_err}')
     logger.info(f'cov_rel_err = {cov_rel_err}')
     # Run TT-ALS with z(t_0) and z(t_1) where t_0 = 0 and t_1  =1
-    x = z_t[0]
-    y = z_t[2]
+    t_0 = t_vals[args.t0_index]
+    h = t_vals[args.h_index]
+    x = z_t[args.t0_index]
+    y = z_t[args.t0_index+ args.h_index]
     #
-    run_tt_als(x=x, y=y, poly_degree=args.degree, rank=args.rank,test_ratio=0.2)
+    run_tt_als(x=x, y=y, t=t_0, poly_degree=args.degree, rank=args.rank, test_ratio=0.2)
     logger.info('Sub-experiment finished')

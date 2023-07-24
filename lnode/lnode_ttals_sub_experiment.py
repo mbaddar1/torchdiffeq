@@ -1,10 +1,14 @@
 import argparse
 import logging
 import pickle
+import sys
+from typing import List
 
+import pingouin as pg
 import numpy as np
 import torch
 
+from GMSOC.functional_tt_fabrique import orthpoly, Extended_TensorTrain
 from examples.models import HyperNetwork, CNF
 
 # get logger
@@ -12,13 +16,16 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 
 # Global-vars
-N_SAMPLES = 1024
+N_SAMPLES = 4096
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--version', type=str, required=True)
 parser.add_argument('--adjoint', action='store_true')
 parser.add_argument('--trajectory-opt', type=str, choices=['vanilla', 'hybrid'])
 parser.add_argument('--gpu', type=int, default=0)
+parser.add_argument('--device', type=str, choices=['cpu', 'gpu'], required=True)
+parser.add_argument('--rank', type=int, required=True)
+parser.add_argument('--degree', type=int, required=True)
 args = parser.parse_args()
 if args.adjoint:
     from torchdiffeq import odeint_adjoint as odeint
@@ -26,15 +33,78 @@ else:
     from torchdiffeq import odeint
 
 # device
-device = torch.device('cuda:' + str(args.gpu)
-                      if torch.cuda.is_available() else 'cpu')
+if args.device == 'cpu':
+    device = torch.device('cpu')
+else:
+    device = torch.torch.device('cuda:' + str(args.gpu)
+                                if torch.cuda.is_available() else 'cpu')
+logger.info(f'Is CUDA device available? = {torch.cuda.is_available()}')
+logger.info(f'Device = {device}')
+
+
+def adjust_tensor_to_domain(x: torch.Tensor, domain_stripe: List[float]):
+    x_min = torch.min(x, dim=0)
+    x_max = torch.max(x, dim=0)
+    x_scaled = (x - x_min.values) / (x_max.values - x_min.values)
+    # FIXME, for debugging
+    x_scaled_min = torch.min(x_scaled, dim=0)
+    x_scaled_max = torch.max(x_scaled, dim=0)
+    x_domain = domain_stripe[0] + (domain_stripe[1] - domain_stripe[0]) * x_scaled
+    # FIXME for debugging
+    x_domain_min = torch.min(x_domain, dim=0)
+    x_domain_max = torch.max(x_domain, dim=0)
+    return x_domain
+
+
+def run_tt_als(x: torch.Tensor, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float):
+    Dx = x.shape[1]
+    Dy = y.shape[1]
+    N = x.shape[0]
+    N_test = int(test_ratio * N)
+    N_train = N - N_test
+    #
+
+    degrees = [poly_degree] * Dx
+    ranks = [1] + [rank] * (Dx - 1) + [1]
+    order = len(degrees)
+    domain = [[-1., 1.] for _ in range(Dx)]
+    domain_stripe = domain[0]
+    op = orthpoly(degrees, domain)
+
+    ETT = Extended_TensorTrain(op, ranks)
+    for dy in range(Dy):
+        y_d = y[:, dy].view(-1, 1)
+        # ALS parameters
+        reg_coeff = 1e-2
+        iterations = 40
+        tol = 5e-10
+        x_domain = adjust_tensor_to_domain(x=x, domain_stripe=domain_stripe)
+        rule = None
+        # rule = tt.Dörfler_Adaptivity(delta = 1e-6,  maxranks = [32]*(n-1), dims = [feature_dim]*n, rankincr = 1)
+        ETT.fit(x=x_domain.type(torch.float64)[:N_train, :], y=y_d.type(torch.float64)[:N_train, :],
+                iterations=iterations, rule=rule, tol=tol,
+                verboselevel=1, reg_param=reg_coeff)
+        ETT.tt.set_core(Dx - 1)
+        train_error = (torch.norm(ETT(x_domain.type(torch.float64)[:N_train, :]) -
+                                  y_d.type(torch.float64)[:N_train, :]) ** 2 / torch.norm(
+            y_d.type(torch.float64)[:N_train, :]) ** 2).item()
+        val_error = (torch.norm(ETT(x_domain.type(torch.float64)[N_train:, :]) -
+                                y_d.type(torch.float64)[N_train:, :]) ** 2 / torch.norm(
+            y_d.type(torch.float64)[N_train:, :]) ** 2).item()
+        print('relative error on training set: ', train_error)
+        print('relative error on test set: ', val_error)
+        # print('relative error on validation set: ', val_error)
+        print("========================================================")
+
+
 if __name__ == '__main__':
-    meta_data = pickle.load(open(f'artifacts/{args.trajectory_opt}_{args.version}.pkl', "rb"))
+    meta_data = pickle.load(open(f'lnode/artifacts/{args.trajectory_opt}_{args.version}.pkl', "rb"))
     dim = meta_data['dim']
     hidden_dim = meta_data['args']['hidden_dim']
     width = meta_data['args']['width']
-    trajectory_model = CNF(in_out_dim=dim, hidden_dim=hidden_dim, width=width,device=device)
+    trajectory_model = CNF(in_out_dim=dim, hidden_dim=hidden_dim, width=width, device=device).type(torch.float32)
     trajectory_model.load_state_dict(meta_data['model'])
+    logger.info(f'Successfully loaded CNF model and Meta data')
 
     # Verify normality of generated data
     ## 1. Generate samples out of the loaded model and meta-data
@@ -43,8 +113,30 @@ if __name__ == '__main__':
     t0 = meta_data['args']['t0']
     tN = meta_data['args']['t1']
     t_vals = torch.tensor(list(np.arange(t0, tN + 1, 1)))
-    u = odeint(func=trajectory_model, y0=(z0,logp_diff_t0), t=t_vals)
-    x=10
-    ##2. verify parameters of generated data
-    # logger.info(f'Sub-experiment finished')
+    logger.info(f'Running CNF trajectory')
+    z_t, _ = odeint(func=trajectory_model, y0=(z0, logp_diff_t0), t=t_vals)
 
+    ##2. verify parameters of generated data
+    z_tN = z_t[-1]
+    z_tN_np = z_tN.detach().cpu().numpy()
+    normality_test_results = pg.multivariate_normality(X=z_tN_np)
+    logger.info(f'Normality test results = {normality_test_results}')
+    sample_mio = z_tN.mean(0)
+    sample_sigma = torch.cov(z_tN.T)
+
+    mean_abs_err = torch.norm(sample_mio.detach().cpu() - meta_data['target_distribution'].mean)
+    mean_rel_err = mean_abs_err / torch.norm(
+        meta_data['target_distribution'].mean)
+    cov_abs_err = torch.norm(sample_sigma.detach().cpu() - meta_data['target_distribution'].covariance_matrix)
+    cov_rel_err = cov_abs_err / torch.norm(
+        meta_data['target_distribution'].covariance_matrix)
+    logger.info(f'mean_abs_err = {mean_abs_err}')
+    logger.info(f'mean_rel_err = {mean_rel_err}')
+    logger.info(f'cov_abs_err = {cov_abs_err}')
+    logger.info(f'cov_rel_err = {cov_rel_err}')
+    # Run TT-ALS with z(t_0) and z(t_1) where t_0 = 0 and t_1  =1
+    x = z_t[0]
+    y = z_t[2]
+    #
+    run_tt_als(x=x, y=y, poly_degree=args.degree, rank=args.rank,test_ratio=0.2)
+    logger.info('Sub-experiment finished')

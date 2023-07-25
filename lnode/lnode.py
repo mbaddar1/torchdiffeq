@@ -18,11 +18,10 @@ import matplotlib.pyplot as plt
 from sklearn.datasets import make_circles
 from torch.distributions import MultivariateNormal
 import torch
-import torch.nn as nn
 import torch.optim as optim
 
 # Global Variables
-DIM_DIST_MAP = {'circles': 2, 'gauss3d': 3, 'gauss4d': 4}
+DIM_DIST_MAP = {'circles': 2, 'gauss3d': 3, 'gauss4d': 4, 'gauss10d': 10}
 # get logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
@@ -41,7 +40,7 @@ parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--train_dir', type=str, default=None)
 parser.add_argument('--results_dir', type=str, default="./results")
 # LNODE
-parser.add_argument('--distribution', type=str, choices=['circles', 'gauss3d', 'gauss4d'])
+parser.add_argument('--distribution', type=str, choices=['circles', 'gauss3d', 'gauss4d', 'gauss10d'])
 parser.add_argument('--trajectory-opt', type=str, choices=['vanilla', 'hybrid'])
 args = parser.parse_args()
 
@@ -92,6 +91,12 @@ def get_distribution(distribution_name: str) -> Union[torch.distributions.Distri
     elif distribution_name == 'gauss4d':
         loc = torch.tensor([-0.1, 0.2, -0.4, 0.4])
         scale = torch.diag(torch.tensor([0.15, 0.01, 0.19, 0.08]))
+        dist = MultivariateNormal(loc, scale)
+    elif distribution_name == 'gauss10d':
+        loc = torch.tensor([-0.7916, 0.3473, -0.0946, -0.7393, 0.3586, -0.4796, -0.1542, -0.8664,
+                            -0.1335, 0.0381])
+        scale = torch.diag(torch.tensor([0.4606, 0.4395, 0.3699, 0.8094, 0.2963, 0.1966, 0.4382, 0.8038, 0.6813,
+                                         0.1031]))
         dist = MultivariateNormal(loc, scale)
     return dist
 

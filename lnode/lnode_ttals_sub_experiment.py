@@ -76,8 +76,8 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
     op = orthpoly(degrees, domain)
 
     ETT = Extended_TensorTrain(op, ranks)
-    for dy in range(Dy):
-        y_d = y[:, dy].view(-1, 1)
+    for d_y in range(Dy):
+        y_d = y[:, d_y].view(-1, 1)
         # ALS parameters
         reg_coeff = 1e-2
         iterations = 40
@@ -95,8 +95,8 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
         val_error = (torch.norm(ETT(x_domain.type(torch.float64)[N_train:, :]) -
                                 y_d.type(torch.float64)[N_train:, :]) ** 2 / torch.norm(
             y_d.type(torch.float64)[N_train:, :]) ** 2).item()
-        logger.info(f'TT-ALS Relative error on training set = {train_error}')
-        logger.info(f'TT-ALS Relative error on test set = {val_error}')
+        logger.info(f'For d_y  = {d_y} :TT-ALS Relative error on training set = {train_error}')
+        logger.info(f'For d_y = {d_y}: TT-ALS Relative error on test set = {val_error}')
         # print('relative error on validation set: ', val_error)
         print("========================================================")
 
@@ -142,7 +142,7 @@ if __name__ == '__main__':
     t_0 = t_vals[args.t0_index]
     h = t_vals[args.h_index]
     x = z_t[args.t0_index]
-    y = z_t[args.t0_index+ args.h_index]
+    y = z_t[args.t0_index + args.h_index]
     #
     run_tt_als(x=x, y=y, t=t_0, poly_degree=args.degree, rank=args.rank, test_ratio=0.2)
     logger.info('Sub-experiment finished')

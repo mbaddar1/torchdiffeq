@@ -19,7 +19,7 @@ logger = logging.getLogger()
 N_SAMPLES = 4096
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--version', type=str, required=True)
+parser.add_argument('--artifact', type=str, required=True)
 parser.add_argument('--adjoint', action='store_true')
 parser.add_argument('--trajectory-opt', type=str, choices=['vanilla', 'hybrid'])
 parser.add_argument('--gpu', type=int, default=0)
@@ -81,7 +81,7 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
         # ALS parameters
         reg_coeff = 1e-2
         iterations = 40
-        tol = 5e-10
+        tol = 1e-6
         x_domain = adjust_tensor_to_domain(x=x, domain_stripe=domain_stripe)
         rule = None
         # rule = tt.Dörfler_Adaptivity(delta = 1e-6,  maxranks = [32]*(n-1), dims = [feature_dim]*n, rankincr = 1)
@@ -102,20 +102,21 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
 
 
 if __name__ == '__main__':
-    meta_data = pickle.load(open(f'lnode/artifacts/{args.trajectory_opt}_{args.version}.pkl', "rb"))
-    dim = meta_data['dim']
-    hidden_dim = meta_data['args']['hidden_dim']
-    width = meta_data['args']['width']
+    artifact = pickle.load(
+        open(f'lnode/artifacts/vanilla_2023-07-20T13:36:11.559464_dist_MultivariateNormal_d_4_niters_1000.pkl', "rb"))
+    dim = artifact['dim']
+    hidden_dim = artifact['args']['hidden_dim']
+    width = artifact['args']['width']
     trajectory_model = CNF(in_out_dim=dim, hidden_dim=hidden_dim, width=width, device=device).type(torch.float32)
-    trajectory_model.load_state_dict(meta_data['model'])
+    trajectory_model.load_state_dict(artifact['model'])
     logger.info(f'Successfully loaded CNF model and Meta data')
 
     # Verify normality of generated data
     ## 1. Generate samples out of the loaded model and meta-data
-    z0 = meta_data['base_distribution'].sample(torch.Size([N_SAMPLES])).to(device)
+    z0 = artifact['base_distribution'].sample(torch.Size([N_SAMPLES])).to(device)
     logp_diff_t0 = torch.zeros(N_SAMPLES, 1).type(torch.float32).to(device)
-    t0 = meta_data['args']['t0']
-    tN = meta_data['args']['t1']
+    t0 = artifact['args']['t0']
+    tN = artifact['args']['t1']
     t_vals = torch.tensor(list(np.arange(t0, tN + 1, 1)))
     logger.info(f'Running CNF trajectory')
     z_t, _ = odeint(func=trajectory_model, y0=(z0, logp_diff_t0), t=t_vals)
@@ -128,12 +129,12 @@ if __name__ == '__main__':
     sample_mio = z_tN.mean(0)
     sample_sigma = torch.cov(z_tN.T)
 
-    mean_abs_err = torch.norm(sample_mio.detach().cpu() - meta_data['target_distribution'].mean)
+    mean_abs_err = torch.norm(sample_mio.detach().cpu() - artifact['target_distribution'].mean)
     mean_rel_err = mean_abs_err / torch.norm(
-        meta_data['target_distribution'].mean)
-    cov_abs_err = torch.norm(sample_sigma.detach().cpu() - meta_data['target_distribution'].covariance_matrix)
+        artifact['target_distribution'].mean)
+    cov_abs_err = torch.norm(sample_sigma.detach().cpu() - artifact['target_distribution'].covariance_matrix)
     cov_rel_err = cov_abs_err / torch.norm(
-        meta_data['target_distribution'].covariance_matrix)
+        artifact['target_distribution'].covariance_matrix)
     logger.info(f'mean_abs_err = {mean_abs_err}')
     logger.info(f'mean_rel_err = {mean_rel_err}')
     logger.info(f'cov_abs_err = {cov_abs_err}')

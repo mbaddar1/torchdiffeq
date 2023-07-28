@@ -1,3 +1,17 @@
+"""
+This script is to train Vanilla-CNF model as baseline and LNODE model as a Low-Rank approximation to accelerate
+ the training for High Dimensional Distributions. The script is based on the original CNF script here
+ https://github.com/rtqichen/torchdiffeq/blob/master/examples/cnf.py
+
+Examples for running via command line
+=======================================
+
+1) Train a Vanilla-CNF
+export PYTHONPATH=$PYTHONPATH:.
+python3 lnode/lnode.py --niters 1000 --distribution gauss6d --t0 0 --t1 10 --trajectory-opt vanilla
+
+2)Train a LNODE model [TBD]
+"""
 import logging
 import os
 import argparse

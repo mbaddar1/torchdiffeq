@@ -11,6 +11,7 @@ export PYTHONPATH=$PYTHONPATH:.
 python3 lnode/lnode.py --niters 1000 --distribution gauss6d --t0 0 --t1 10 --trajectory-opt vanilla
 
 2)Train a LNODE model [TBD]
+
 """
 import logging
 import os

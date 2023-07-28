@@ -1,7 +1,23 @@
+"""
+This script is for running Sub-Experiment to run a TT-ALS training:
+
+\begin{equation*}
+    \bm{\mathscr{W}_{TT}} = argmin_{\bm{\mathscr{W}}_{TT}}
+    ||\mathbf{z}_{d}(t_0+h)-\bm{\mathscr{W}}^{d}_{TT}\bm{\tilde{\Phi}}^{poly}_{\mathcal{R}=1}([\mathbf{z}(t_0),t_0])||_2^2
+\end{equation*}
+
+The generated sub-trajectory [ z(t_0) -> z(t_0 + h ) ] is based on a generated vanilla-CNF model
+
+The purpose of this sub-experiment is to test the train-ability of sub-trajectory based on
+TT-ALS training method
+
+Example CMD line argument for running
+============================================
+python3 lnode/lnode_ttals_sub_experiment.py --artifact "artifacts/vanilla_2023-07-20T13:36:11.559464_dist_MultivariateNormal_d_4_niters_1000.pkl" --trajectory-opt "vanilla" --device "cpu" --rank 2 --degree 3 --t0-index 0 --h-index 5
+"""
 import argparse
 import logging
 import pickle
-import sys
 from typing import List
 
 import pingouin as pg
@@ -9,7 +25,7 @@ import numpy as np
 import torch
 
 from GMSOC.functional_tt_fabrique import orthpoly, Extended_TensorTrain
-from examples.models import HyperNetwork, CNF
+from examples.models import CNF
 
 # get logger
 logging.basicConfig(level=logging.INFO)
@@ -70,7 +86,7 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
     #
     degrees = [poly_degree] * Dx
     ranks = [1] + [rank] * (Dx - 1) + [1]
-    order = len(degrees)
+    order = len(degrees) # not used, but for debugging only
     domain = [[-1., 1.] for _ in range(Dx)]
     domain_stripe = domain[0]
     op = orthpoly(degrees, domain)

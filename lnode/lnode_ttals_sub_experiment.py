@@ -159,8 +159,8 @@ if __name__ == '__main__':
     # Run TT-ALS with z(t_0) and z(t_1) where t_0 = 0 and t_1  =1
     t_N = t_vals[-1]
     t_N_minus_h = t_vals[-1-args.h_steps]
-    x = z_t[-1-args.h_steps]
-    y = z_tN
+    y = z_t[-1-args.h_steps]
+    x = z_tN
     #
-    run_tt_als(x=x, y=y, t=t_N_minus_h, poly_degree=args.degree, rank=args.rank, test_ratio=0.2)
+    run_tt_als(x=x, y=y, t=t_N, poly_degree=args.degree, rank=args.rank, test_ratio=0.2)
     logger.info('Sub-experiment finished')

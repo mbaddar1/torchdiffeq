@@ -13,7 +13,8 @@ TT-ALS training method
 
 Example CMD line argument for running
 ============================================
-python3 lnode/lnode_ttals_sub_experiment.py --artifact "artifacts/vanilla_2023-07-20T13:36:11.559464_dist_MultivariateNormal_d_4_niters_1000.pkl" --trajectory-opt "vanilla" --device "cpu" --rank 2 --degree 3 --t0-index 0 --h-index 5
+export PYTHONPATH="${PYTHONPATH}:./torchdiffeq/GMSOC"
+python3 lnode/lnode_ttals_sub_experiment.py --artifact "lnode/artifacts/vanilla_2023-07-20T13:36:11.559464_dist_MultivariateNormal_d_4_niters_1000.pkl" --trajectory-opt "vanilla" --device "cpu" --rank 2 --degree 3 --h-steps 3
 """
 import argparse
 import logging
@@ -42,8 +43,8 @@ parser.add_argument('--gpu', type=int, default=0)
 parser.add_argument('--device', type=str, choices=['cpu', 'gpu'], required=True)
 parser.add_argument('--rank', type=int, required=True)
 parser.add_argument('--degree', type=int, required=True)
-parser.add_argument('--h-index', type=int, required=True)
-parser.add_argument('--t0-index', type=int, required=True)
+parser.add_argument('--h-steps', type=int, required=True)
+# parser.add_argument('--t0-index', type=int, required=True)
 args = parser.parse_args()
 if args.adjoint:
     from torchdiffeq import odeint_adjoint as odeint
@@ -119,7 +120,7 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
 
 if __name__ == '__main__':
     artifact = pickle.load(
-        open(f'lnode/artifacts/vanilla_2023-07-20T13:36:11.559464_dist_MultivariateNormal_d_4_niters_1000.pkl', "rb"))
+        open(f'{args.artifact}', "rb"))
     dim = artifact['dim']
     hidden_dim = artifact['args']['hidden_dim']
     width = artifact['args']['width']
@@ -156,10 +157,10 @@ if __name__ == '__main__':
     logger.info(f'cov_abs_err = {cov_abs_err}')
     logger.info(f'cov_rel_err = {cov_rel_err}')
     # Run TT-ALS with z(t_0) and z(t_1) where t_0 = 0 and t_1  =1
-    t_0 = t_vals[args.t0_index]
-    h = t_vals[args.h_index]
-    x = z_t[args.t0_index]
-    y = z_t[args.t0_index + args.h_index]
+    t_N = t_vals[-1]
+    t_N_minus_h = t_vals[-1-args.h_steps]
+    x = z_t[-1-args.h_steps]
+    y = z_tN
     #
-    run_tt_als(x=x, y=y, t=t_0, poly_degree=args.degree, rank=args.rank, test_ratio=0.2)
+    run_tt_als(x=x, y=y, t=t_N_minus_h, poly_degree=args.degree, rank=args.rank, test_ratio=0.2)
     logger.info('Sub-experiment finished')

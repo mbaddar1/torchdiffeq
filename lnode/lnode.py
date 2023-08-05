@@ -25,6 +25,7 @@ from PIL import Image
 import numpy as np
 import matplotlib
 from torch import Tensor
+from torch.optim import Optimizer
 
 from examples.models import HyperNetwork, CNF
 
@@ -130,6 +131,30 @@ def get_batch(num_samples: int, distribution_name: str) -> tuple[Tensor | Any, A
     return x, logp_diff_t1
 
 
+def vanilla_cnf_optimize_step(optimizer: Optimizer, cnf_model: torch.nn.Module, x: torch.Tensor, t0: float, tN: float,
+                              logp_diff_tN: torch.Tensor,
+                              opt_method: str) -> torch.Tensor:
+    # 1) Zero the weights
+    optimizer.zero_grad()
+    # 2) Forward /odeint
+    z_t, logp_diff_t = odeint(
+        cnf_model,
+        (x, logp_diff_tN),
+        torch.tensor([tN, t0]).type(torch.float32).to(device),
+        atol=1e-5,
+        rtol=1e-5,
+        method='dopri5',
+    )
+    z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
+    logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
+    loss = -logp_x.mean(0)
+    # 3) Backward (adjoint if odeint is attached to ode_adjoint)
+    loss.backward()
+    # 4) Update parameters
+    optimizer.step()
+    return loss
+
+
 if __name__ == '__main__':
     # dump args
     logger.info(f'Args:\n{args}')
@@ -163,27 +188,8 @@ if __name__ == '__main__':
             optimizer.zero_grad()
 
             x, logp_diff_t1 = get_batch(num_samples=args.num_samples, distribution_name=args.distribution)
-            if args.trajectory_opt == 'vanilla':
-                z_t, logp_diff_t = odeint(
-                    func,
-                    (x, logp_diff_t1),
-                    torch.tensor([args.t1, args.t0]).type(torch.float32).to(device),
-                    atol=1e-5,
-                    rtol=1e-5,
-                    method='dopri5',
-                )
-            else:
-                raise ValueError(f"Unknown trajectory optimization : {args.trajectory_opt_method}")
-            z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
-
-            logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
-            loss = -logp_x.mean(0)
-
-            if args.trajectory_opt == 'vanilla':
-                loss.backward()
-                optimizer.step()
-            else:
-                raise ValueError(f"Unknown trajectory optimization : {args.trajectory_opt_method}")
+            loss = vanilla_cnf_optimize_step(optimizer=optimizer, cnf_model=func, x=x, t0=args.t0, tN=args.t1,
+                                             logp_diff_tN=logp_diff_t1, opt_method="")
             loss_meter.update(loss.item())
             loss_curve.append(loss_meter.avg)
             print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss_meter.avg))

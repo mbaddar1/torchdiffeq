@@ -132,8 +132,7 @@ def get_batch(num_samples: int, distribution_name: str) -> tuple[Tensor | Any, A
 
 
 def vanilla_cnf_optimize_step(optimizer: Optimizer, cnf_model: torch.nn.Module, x: torch.Tensor, t0: float, tN: float,
-                              logp_diff_tN: torch.Tensor,
-                              opt_method: str) -> torch.Tensor:
+                              logp_diff_tN: torch.Tensor) -> torch.Tensor:
     # 1) Zero the weights
     optimizer.zero_grad()
     # 2) Forward /odeint
@@ -188,8 +187,13 @@ if __name__ == '__main__':
             optimizer.zero_grad()
 
             x, logp_diff_t1 = get_batch(num_samples=args.num_samples, distribution_name=args.distribution)
-            loss = vanilla_cnf_optimize_step(optimizer=optimizer, cnf_model=func, x=x, t0=args.t0, tN=args.t1,
-                                             logp_diff_tN=logp_diff_t1, opt_method="")
+            if args.trajectory_opt == "vanilla":
+                loss = vanilla_cnf_optimize_step(optimizer=optimizer, cnf_model=func, x=x, t0=args.t0, tN=args.t1,
+                                                 logp_diff_tN=logp_diff_t1)
+            elif args.trajectory_opt == "hybrid":
+                pass
+            else:
+                raise ValueError(f"Unknown trajectory optimization method = {args.trajectory_opt}")
             loss_meter.update(loss.item())
             loss_curve.append(loss_meter.avg)
             print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss_meter.avg))

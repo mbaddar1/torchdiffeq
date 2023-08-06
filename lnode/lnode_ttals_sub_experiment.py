@@ -87,7 +87,7 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
     #
     degrees = [poly_degree] * Dx
     ranks = [1] + [rank] * (Dx - 1) + [1]
-    order = len(degrees) # not used, but for debugging only
+    order = len(degrees)  # not used, but for debugging only
     domain = [[-1., 1.] for _ in range(Dx)]
     domain_stripe = domain[0]
     op = orthpoly(degrees, domain)
@@ -130,26 +130,26 @@ if __name__ == '__main__':
 
     # Verify normality of generated data
     ## 1. Generate samples out of the loaded model and meta-data
-    z0 = artifact['base_distribution'].sample(torch.Size([N_SAMPLES])).to(device)
+    z0 = artifact['target_distribution'].sample(torch.Size([N_SAMPLES])).to(device)
     logp_diff_t0 = torch.zeros(N_SAMPLES, 1).type(torch.float32).to(device)
     t0 = artifact['args']['t0']
     tN = artifact['args']['t1']
-    t_vals = torch.tensor(list(np.arange(t0, tN + 1, 1)))
+    t_vals = torch.tensor(list(np.arange(tN, t0 - 1, -1)))
     logger.info(f'Running CNF trajectory')
     z_t, _ = odeint(func=trajectory_model, y0=(z0, logp_diff_t0), t=t_vals)
 
     ##2. verify parameters of generated data
-    z_tN = z_t[-1]
-    z_tN_np = z_tN.detach().cpu().numpy()
+    z_t0_hat = z_t[-1]
+    z_tN_np = z_t0_hat.detach().cpu().numpy()
     normality_test_results = pg.multivariate_normality(X=z_tN_np)
     logger.info(f'Normality test results = {normality_test_results}')
-    sample_mio = z_tN.mean(0)
-    sample_sigma = torch.cov(z_tN.T)
+    sample_mio = z_t0_hat.mean(0)
+    sample_sigma = torch.cov(z_t0_hat.T)
 
-    mean_abs_err = torch.norm(sample_mio.detach().cpu() - artifact['target_distribution'].mean)
+    mean_abs_err = torch.norm(sample_mio - artifact['base_distribution'].mean.detach().cpu())
     mean_rel_err = mean_abs_err / torch.norm(
         artifact['target_distribution'].mean)
-    cov_abs_err = torch.norm(sample_sigma.detach().cpu() - artifact['target_distribution'].covariance_matrix)
+    cov_abs_err = torch.norm(sample_sigma - artifact['base_distribution'].covariance_matrix.detach().cpu())
     cov_rel_err = cov_abs_err / torch.norm(
         artifact['target_distribution'].covariance_matrix)
     logger.info(f'mean_abs_err = {mean_abs_err}')
@@ -157,10 +157,10 @@ if __name__ == '__main__':
     logger.info(f'cov_abs_err = {cov_abs_err}')
     logger.info(f'cov_rel_err = {cov_rel_err}')
     # Run TT-ALS with z(t_0) and z(t_1) where t_0 = 0 and t_1  =1
-    t_N = t_vals[-1]
-    t_N_minus_h = t_vals[-1-args.h_steps]
-    y = z_t[-1-args.h_steps]
-    x = z_tN
+    t_N = t_vals[0]
+    t_N_minus_h = t_vals[args.h_steps]
+    y = z_t[args.h_steps]  # z(t_N - h)
+    x = z_t[0]  # z(t_N)
     #
     run_tt_als(x=x, y=y, t=t_N, poly_degree=args.degree, rank=args.rank, test_ratio=0.2)
     logger.info('Sub-experiment finished')

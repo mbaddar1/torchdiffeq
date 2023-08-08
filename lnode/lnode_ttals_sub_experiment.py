@@ -14,7 +14,7 @@ TT-ALS training method
 Example CMD line argument for running
 ============================================
 export PYTHONPATH="${PYTHONPATH}:./torchdiffeq/GMSOC"
-python3 lnode/lnode_ttals_sub_experiment.py --artifact "lnode/artifacts/vanilla_2023-07-20T13:36:11.559464_dist_MultivariateNormal_d_4_niters_1000.pkl" --trajectory-opt "vanilla" --device "cpu" --rank 2 --degree 3 --h-steps 3
+python3 lnode/lnode_ttals_sub_experiment.py --artifact "lnode/artifacts/vanilla_2023-07-20T13:36:11.559464_dist_MultivariateNormal_d_4_niters_1000.pkl" --trajectory-opt "vanilla" --device "cpu" --rank 2 --degree 3 --h-steps 3 --tol 1e-4
 """
 import argparse
 import logging
@@ -44,6 +44,8 @@ parser.add_argument('--device', type=str, choices=['cpu', 'gpu'], required=True)
 parser.add_argument('--rank', type=int, required=True)
 parser.add_argument('--degree', type=int, required=True)
 parser.add_argument('--h-steps', type=int, required=True)
+parser.add_argument('--tol',type=float,required=True)
+
 # parser.add_argument('--t0-index', type=int, required=True)
 args = parser.parse_args()
 if args.adjoint:
@@ -76,7 +78,7 @@ def adjust_tensor_to_domain(x: torch.Tensor, domain_stripe: List[float]):
     return x_domain
 
 
-def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float):
+def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float,tol:float):
     N = x.shape[0]
     N_test = int(test_ratio * N)
     N_train = N - N_test
@@ -98,7 +100,6 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
         # ALS parameters
         reg_coeff = 1e-2
         iterations = 40
-        tol = 1e-6
         x_domain = adjust_tensor_to_domain(x=x, domain_stripe=domain_stripe)
         rule = None
         # rule = tt.Dörfler_Adaptivity(delta = 1e-6,  maxranks = [32]*(n-1), dims = [feature_dim]*n, rankincr = 1)
@@ -114,7 +115,6 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
             y_d.type(torch.float64)[N_train:, :]) ** 2).item()
         logger.info(f'For d_y  = {d_y} :TT-ALS Relative error on training set = {train_error}')
         logger.info(f'For d_y = {d_y}: TT-ALS Relative error on test set = {val_error}')
-        # print('relative error on validation set: ', val_error)
         print("========================================================")
 
 
@@ -140,8 +140,8 @@ if __name__ == '__main__':
 
     ##2. verify parameters of generated data
     z_t0_hat = z_t[-1]
-    z_tN_np = z_t0_hat.detach().cpu().numpy()
-    normality_test_results = pg.multivariate_normality(X=z_tN_np)
+    z_t0_np = z_t0_hat.detach().cpu().numpy()
+    normality_test_results = pg.multivariate_normality(X=z_t0_np)
     logger.info(f'Normality test results = {normality_test_results}')
     sample_mio = z_t0_hat.mean(0)
     sample_sigma = torch.cov(z_t0_hat.T)
@@ -156,11 +156,14 @@ if __name__ == '__main__':
     logger.info(f'mean_rel_err = {mean_rel_err}')
     logger.info(f'cov_abs_err = {cov_abs_err}')
     logger.info(f'cov_rel_err = {cov_rel_err}')
-    # Run TT-ALS with z(t_0) and z(t_1) where t_0 = 0 and t_1  =1
     t_N = t_vals[0]
     t_N_minus_h = t_vals[args.h_steps]
-    y = z_t[args.h_steps]  # z(t_N - h)
-    x = z_t[0]  # z(t_N)
+    h = t_N - t_N_minus_h
+    # mind the signs !!
+    z_tN = z_t[0]
+    z_tN_minus_h = z_t[args.h_steps]
+    y = (z_tN_minus_h-z_tN)/(-h)
+    x = z_tN
     #
-    run_tt_als(x=x, y=y, t=t_N, poly_degree=args.degree, rank=args.rank, test_ratio=0.2)
+    run_tt_als(x=x, y=y, t=t_N, poly_degree=args.degree, rank=args.rank, test_ratio=0.2,tol=args.tol)
     logger.info('Sub-experiment finished')

@@ -24,10 +24,13 @@ from typing import List
 import pingouin as pg
 import numpy as np
 import torch
-
+from utils import is_domain_adjusted
 from GMSOC.functional_tt_fabrique import orthpoly, Extended_TensorTrain
 from examples.models import CNF
+from utils import domain_adjust
 
+# Global Variables
+EPS = 1e-4
 # get logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
@@ -43,9 +46,15 @@ parser.add_argument('--degree', type=int, required=True)
 parser.add_argument('--h-steps', type=int, required=True)
 parser.add_argument('--tol', type=float, required=True)
 parser.add_argument('--n-samples', type=int, required=True)
+# pass a list as cmd args
+# https://stackoverflow.com/a/32763023/5937273
+parser.add_argument('--domain', nargs='*', type=float, default=[-1, 1], help='domain to adjust target R.V to')
 
 # parser.add_argument('--t0-index', type=int, required=True)
 args = parser.parse_args()
+
+assert isinstance(args.domain, list) and len(args.domain) == 2 and args.domain[0] < args.domain[1], \
+    f"domain must be of type list, len(list) = 2 and domain[0] < domain[1] , however we got domain = {args.domain}"
 if args.adjoint:
     from torchdiffeq import odeint_adjoint as odeint
 else:
@@ -61,39 +70,28 @@ logger.info(f'Is CUDA device available? = {torch.cuda.is_available()}')
 logger.info(f'Device = {device}')
 
 
-def adjust_tensor_to_domain(x: torch.Tensor, domain_stripe: List[float]):
-    epsilon = 0.01
-    x_min = torch.min(x, dim=0)
-    x_max = torch.max(x, dim=0)
-    x_scaled = (x - x_min.values) / (x_max.values - x_min.values + epsilon)
-    # FIXME, for debugging
-    x_scaled_min = torch.min(x_scaled, dim=0)
-    x_scaled_max = torch.max(x_scaled, dim=0)
-    x_domain = domain_stripe[0] + (domain_stripe[1] - domain_stripe[0]) * x_scaled
-    # FIXME for debugging
-    x_domain_min = torch.min(x_domain, dim=0)
-    x_domain_max = torch.max(x_domain, dim=0)
-    return x_domain
-
-
-def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float,
-               tol: float) -> List[Extended_TensorTrain]:
-    N = x.shape[0]
+def run_tt_als(x_aug: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float,
+               tol: float) -> dict:
+    N = x_aug.shape[0]
     N_test = int(test_ratio * N)
     N_train = N - N_test
     #
-    x = torch.cat(tensors=[x, torch.tensor([t]).repeat(N, 1)], dim=1)
-    Dx = x.shape[1]
+    # FIXME , rename to x_aug
+    x_aug = torch.cat(tensors=[x_aug, torch.tensor([t]).repeat(N, 1)], dim=1)
+    Dx_aug = x_aug.shape[1]
     Dy = y.shape[1]
     #
-    degrees = [poly_degree] * Dx
-    ranks = [1] + [rank] * (Dx - 1) + [1]
-    order = len(degrees)  # not used, but for debugging only
-    domain = [[-1., 1.] for _ in range(Dx)]
+    degrees = [poly_degree] * Dx_aug
+    ranks = [1] + [rank] * (Dx_aug - 1) + [1]
+    # order = len(degrees)  # not used, but for debugging only
+    domain = [args.domain for _ in range(Dx_aug)]
     domain_stripe = domain[0]
     op = orthpoly(degrees, domain)
-    x_domain_adjusted = adjust_tensor_to_domain(x=x, domain_stripe=domain_stripe)
-    ETTs = [Extended_TensorTrain(op, ranks) for _ in range(Dy)]
+    x_domain_adjusted = domain_adjust(x=x_aug, domain=domain_stripe)
+    is_domain_adjusted(x=x_domain_adjusted, domain=domain_stripe)
+    ETT_fits = [Extended_TensorTrain(op, ranks) for _ in range(Dy)]
+    y_predicted_list = []
+    mse_loss_fn = torch.nn.MSELoss()
     for j in range(Dy):
         y_d = y[:, j].view(-1, 1)
         # ALS parameters
@@ -101,20 +99,31 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
         iterations = 40
         rule = None
         # rule = tt.Dörfler_Adaptivity(delta = 1e-6,  maxranks = [32]*(n-1), dims = [feature_dim]*n, rankincr = 1)
-        ETTs[j].fit(x=x_domain_adjusted.type(torch.float64)[:N_train, :], y=y_d.type(torch.float64)[:N_train, :],
-                    iterations=iterations, rule=rule, tol=tol,
-                    verboselevel=1, reg_param=reg_coeff)
-        ETTs[j].tt.set_core(Dx - 1)
-        train_error = (torch.norm(ETTs[j](x_domain_adjusted.type(torch.float64)[:N_train, :]) -
-                                  y_d.type(torch.float64)[:N_train, :]) ** 2 / torch.norm(
-            y_d.type(torch.float64)[:N_train, :]) ** 2).item()
-        val_error = (torch.norm(ETTs[j](x_domain_adjusted.type(torch.float64)[N_train:, :]) -
-                                y_d.type(torch.float64)[N_train:, :]) ** 2 / torch.norm(
-            y_d.type(torch.float64)[N_train:, :]) ** 2).item()
-        logger.info(f'For j ( d-th dim of y)  = {j} :TT-ALS Relative error on training set = {train_error}')
-        logger.info(f'For j (d-th dim of y)  = {j}: TT-ALS Relative error on test set = {val_error}')
+        ETT_fits[j].fit(x=x_domain_adjusted.type(torch.float64)[:N_train, :], y=y_d.type(torch.float64)[:N_train, :],
+                        iterations=iterations, rule=rule, tol=tol,
+                        verboselevel=1, reg_param=reg_coeff)
+        ETT_fits[j].tt.set_core(Dx_aug - 1)
+        # train_error = (torch.norm(ETT_fits[j](x_domain_adjusted.type(torch.float64)[:N_train, :]) -
+        #                           y_d.type(torch.float64)[:N_train, :]) ** 2 / torch.norm(
+        #     y_d.type(torch.float64)[:N_train, :]) ** 2).item()
+        #
+        # val_error = (torch.norm(ETT_fits[j](x_domain_adjusted.type(torch.float64)[N_train:, :]) -
+        #                         y_d.type(torch.float64)[N_train:, :]) ** 2 / torch.norm(
+        #     y_d.type(torch.float64)[N_train:, :]) ** 2).item()
+        y_d_predict_train = ETT_fits[j](x_domain_adjusted.type(torch.float64)[:N_train, :])
+        y_d_predict_val = ETT_fits[j](x_domain_adjusted.type(torch.float64)[N_train:, :])
+
+        train_rmse = torch.sqrt(mse_loss_fn(y_d_predict_train, y_d.type(torch.float64)[:N_train, :]))
+        test_rmse = torch.sqrt(mse_loss_fn(y_d_predict_val, y_d.type(torch.float64)[N_train:, :]))
+        logger.info(f'For j ( d-th dim of y)  = {j} :TT-ALS Relative error on training set = {train_rmse}')
+        logger.info(f'For j (d-th dim of y)  = {j}: TT-ALS Relative error on test set = {test_rmse}')
+        #
+        y_d_predicted = ETT_fits[j](x_domain_adjusted.type(torch.float64))
+        y_predicted_list.append(y_d_predicted)
         logger.info("======== Finished TT-ALS training ============")
-    return ETTs
+    y_predicted = torch.cat(tensors=y_predicted_list, dim=1)
+    prediction_tot_rmse = torch.sqrt(mse_loss_fn(y, y_predicted))
+    return {'ETT_fits': ETT_fits, 'prediction_tot_rmse': prediction_tot_rmse}
 
 
 def verify_fit_ETT(ETTs_fit: List[Extended_TensorTrain], cnf_trajectory_model: CNF,
@@ -155,7 +164,7 @@ def verify_fit_ETT(ETTs_fit: List[Extended_TensorTrain], cnf_trajectory_model: C
 
     Dy = y.shape[1]
     y_aug = torch.cat([y, torch.tensor([tN]).repeat(n_samples, 1)], dim=1)  # [z_tN,tN]
-    y_aug_domain_adjusted = adjust_tensor_to_domain(x=y_aug, domain_stripe=[-1, 1])  # fixme, make parametric
+    y_aug_domain_adjusted = domain_adjust(x=y_aug, domain_stripe=[-1, 1])  # fixme, make parametric
     y_domain_adjusted_min = torch.min(y_aug_domain_adjusted, dim=0)
     y_domain_adjusted_max = torch.max(y_aug_domain_adjusted, dim=0)
     dzdt_list = []
@@ -224,75 +233,104 @@ if __name__ == '__main__':
     logger.info(f'Successfully loaded CNF model and Meta data')
 
     # Verify normality of generated data
-    ## 1. Generate samples out of the loaded model and meta-data
+    ## step(1). Generate samples out of the loaded model and meta-data
+    ##  then generate z(t0) by odeint z(tN) -> z(t0) and test z(t0) for normality
     z_tN = artifact['target_distribution'].sample(torch.Size([args.n_samples])).to(device)
     logp_diff_tN = torch.zeros(args.n_samples, 1).type(torch.float32).to(device)
     t0 = artifact['args']['t0']
     tN = artifact['args']['t1']
-    t_vals = torch.tensor(list(np.arange(tN, t0 - 1, -1)))
+    t_vals_1 = torch.tensor(list(np.arange(tN, t0 - 1, -1)))
     logger.info(f'Running CNF trajectory')
-    z_t, _ = odeint(func=trajectory_model, y0=(z_tN, logp_diff_tN), t=t_vals)
+    z_t_trajectory_1, logp_diff_1 = odeint(func=trajectory_model, y0=(z_tN, logp_diff_tN), t=t_vals_1)
+    z_t0_1 = z_t_trajectory_1[-1]
+    ## Test the z(t0) generated from step(1) for normality and matching mio and Sigma
+    z_t0_np_1 = z_t0_1.detach().numpy()
+    normality_test = pg.multivariate_normality(X=z_t0_np_1)
+    assert normality_test.normal, ("z(t0) Generated using vanilla-CNF from z(t_N) ~ "
+                                   "N(mio,Sigma) -> z(t_0) ^N(0,a.I) is not Normal")
+    logger.info('Finished testing vanilla CNF Generative path z(tN) ~ N(mio,Sigma) -> z(t0) ~ N(0,a.I) : steps 1 and 2')
+    ## step(2) get z(tN-h) and generate z(t0) using vanilla-CNF from z(tN-h) -> z(t0)
+    tN_minus_h = t_vals_1[args.h_steps].item()
+    z_tN_minus_h = z_t_trajectory_1[args.h_steps]
+    logp_diff_tN_minus_h = logp_diff_1[args.h_steps]
+    h = tN - tN_minus_h
+    assert h > 0, "h must be > 0"
+    t_vals_2 = torch.tensor(list(np.arange(tN_minus_h, t0 - 1, -1)))
+    z_t_trajectory_2, logp_diff_2 = odeint(func=trajectory_model, y0=(z_tN_minus_h, logp_diff_tN_minus_h), t=t_vals_2)
+    z_t0_2 = z_t_trajectory_2[-1]
+    diff_ = torch.norm(z_t0_1 - z_t0_2)
+    logger.info(f'Finished testing vanilla CNF Generative path  z(tN-h) ~ N(mio,Sigma) -> z(t0) ~ N(0,a.I) : step 2')
 
-    # 2. verify the distribution of the generated data
-    ## 2.1 Using HZ test
-    z_t0_hat = z_t[-1]
-    z_t0_np = z_t0_hat.detach().cpu().numpy()
-    normality_test_results = pg.multivariate_normality(X=z_t0_np)
-    logger.info(f'Normality test results = {normality_test_results}')
-    sample_mio = z_t0_hat.mean(0)
-    sample_sigma = torch.cov(z_t0_hat.T)
-    ## 2.2 verify the parameters of the generated data
-    mean_abs_err = torch.norm(sample_mio - artifact['base_distribution'].mean.detach().cpu())
-    mean_rel_err = mean_abs_err / torch.norm(
-        artifact['target_distribution'].mean)
-    cov_abs_err = torch.norm(sample_sigma - artifact['base_distribution'].covariance_matrix.detach().cpu())
-    cov_rel_err = cov_abs_err / torch.norm(
-        artifact['target_distribution'].covariance_matrix)
-    logger.info(f'mean_abs_err = {mean_abs_err}')
-    logger.info(f'mean_rel_err = {mean_rel_err}')
-    logger.info(f'cov_abs_err = {cov_abs_err}')
-    logger.info(f'cov_rel_err = {cov_rel_err}')
-    ## 2.3 calculate log-prob
-    dist_device = artifact['base_distribution'].mean.device
-    log_prob = artifact['base_distribution'].log_prob(z_t0_hat.to(dist_device)).mean(0)
-    prob_ = torch.exp(log_prob)
-    # benchmark with a sample
-    z_t0_benchmark_sample = artifact['base_distribution'].sample(torch.Size([z_t0_hat.shape[1]]))
-    log_prob_benchmark = artifact['base_distribution'].log_prob(z_t0_benchmark_sample).mean(0)
-
-    # 3. Run TT-ALS for the RK-step : z(tN) -> z(tN-h)
-    t_N = t_vals[0]
-    tN_minus_h = t_vals[args.h_steps]
-    h = t_N - tN_minus_h
-    # mind the signs !!
-    z_tN = z_t[0]
-    z_tN_minus_h = z_t[args.h_steps]
-    y = (z_tN_minus_h - z_tN) / (-h)
-    x = z_tN
-    ETTs_fit = run_tt_als(x=x, y=y, t=t_N, poly_degree=args.degree, rank=args.rank, test_ratio=0.2, tol=args.tol)
-    logger.info('Fitting TT-ALS for the sub-trajectory finished')
-    verify_fit_ETT(ETTs_fit=ETTs_fit, cnf_trajectory_model=trajectory_model,
-                   target_distribution=artifact['target_distribution'], base_distribution=artifact['base_distribution'],
-                   t0=artifact['args']['t0'], tN=artifact['args']['t1'], n_samples=args.n_samples, h=h,
-                   tN_minus_h=tN_minus_h)
+    ## step(3)
+    # TT-ALS to find a model that maps z(tN) to z(tN-h) via RK-step (euler step)
+    yy = (z_tN_minus_h - z_tN) / (-h)
+    xx = z_tN
+    results = run_tt_als(x_aug=xx, t=tN, y=yy, poly_degree=args.degree, rank=args.rank, test_ratio=0.2, tol=args.tol)
+    ETT_fits = results['ETT_fits']
+    prediction_tot_rmse = results['prediction_tot_rmse']
+    logger.info(
+        f'Finished TT-ALS with y=(z_tN_minus_h - z_tN) / (-h) and x = z_tN with prediction_tot_rmse  = {prediction_tot_rmse}')
+    ## Generate the
     #
-    # # double test with hybrid trajectory
-    # ## 1. Explicit Euler step
-    # # z(tN-h) = ode_int(z(tN),[tN -> tN-h], f(z(tN),tN))
-    # # apply explicit euler one-step
-    # # z(tN-h) = z(tN) + \int_{tN}^{tN-h} f(z(tN),tN))
-    # # fixme, make domain stripe parametric
-    # N = x.shape[0]
-    # x = z_tN
-    # x = torch.cat([x, torch.tensor([tN]).repeat(N, 1)], dim=1)
-    # x_domain_adjusted = adjust_tensor_to_domain(x=x, domain_stripe=[-1, 1])
-    # x_domain_adjusted_min = torch.min(x_domain_adjusted, dim=0)
-    # x_domain_adjusted_max = torch.max(x_domain_adjusted, dim=0)
-    # Dx = x.shape[1]
-    # ETT_fit.tt.set_core(Dx - 1)
-    # f = ETT_fit(x=x_domain_adjusted)
-    # z_tN_minus_h = z_tN - h * f  # euler step, but backward
-    # t_vals = torch.tensor([t_N_minus_h, t0])
-    # z_t, _ = odeint(func=trajectory_model, y0=(z_tN_minus_h.type(torch.float32), logp_diff_tN), t=t_vals)
+    # # step(2). verify the distribution of the generated data
+    # ## 2.1 Using HZ test
     # z_t0_hat = z_t[-1]
-    # logger.info(f'Finished hybrid trajectory computation')
+    # z_t0_np = z_t0_hat.detach().cpu().numpy()
+    # normality_test_results = pg.multivariate_normality(X=z_t0_np)
+    # logger.info(f'Normality test results = {normality_test_results}')
+    # sample_mio = z_t0_hat.mean(0)
+    # sample_sigma = torch.cov(z_t0_hat.T)
+    # ## 2.2 verify the parameters of the generated data
+    # mean_abs_err = torch.norm(sample_mio - artifact['base_distribution'].mean.detach().cpu())
+    # mean_rel_err = mean_abs_err / torch.norm(
+    #     artifact['target_distribution'].mean)
+    # cov_abs_err = torch.norm(sample_sigma - artifact['base_distribution'].covariance_matrix.detach().cpu())
+    # cov_rel_err = cov_abs_err / torch.norm(
+    #     artifact['target_distribution'].covariance_matrix)
+    # logger.info(f'mean_abs_err = {mean_abs_err}')
+    # logger.info(f'mean_rel_err = {mean_rel_err}')
+    # logger.info(f'cov_abs_err = {cov_abs_err}')
+    # logger.info(f'cov_rel_err = {cov_rel_err}')
+    # ## 2.3 calculate log-prob
+    # dist_device = artifact['base_distribution'].mean.device
+    # log_prob = artifact['base_distribution'].log_prob(z_t0_hat.to(dist_device)).mean(0)
+    # prob_ = torch.exp(log_prob)
+    # # benchmark with a sample
+    # z_t0_benchmark_sample = artifact['base_distribution'].sample(torch.Size([z_t0_hat.shape[1]]))
+    # log_prob_benchmark = artifact['base_distribution'].log_prob(z_t0_benchmark_sample).mean(0)
+    #
+    # # 3. Run TT-ALS for the RK-step : z(tN) -> z(tN-h)
+    # t_N = t_vals[0]
+    # tN_minus_h = t_vals[args.h_steps]
+    # h = t_N - tN_minus_h
+    # # mind the signs !!
+    # z_tN = z_t[0]
+    # z_tN_minus_h = z_t[args.h_steps]
+
+    # ETTs_fit = run_tt_als(x=x, y=y, t=t_N, poly_degree=args.degree, rank=args.rank, test_ratio=0.2, tol=args.tol)
+    # logger.info('Fitting TT-ALS for the sub-trajectory finished')
+    # verify_fit_ETT(ETTs_fit=ETTs_fit, cnf_trajectory_model=trajectory_model,
+    #                target_distribution=artifact['target_distribution'], base_distribution=artifact['base_distribution'],
+    #                t0=artifact['args']['t0'], tN=artifact['args']['t1'], n_samples=args.n_samples, h=h,
+    #                tN_minus_h=tN_minus_h)
+    # #
+    # # # double test with hybrid trajectory
+    # # ## 1. Explicit Euler step
+    # # # z(tN-h) = ode_int(z(tN),[tN -> tN-h], f(z(tN),tN))
+    # # # apply explicit euler one-step
+    # # # z(tN-h) = z(tN) + \int_{tN}^{tN-h} f(z(tN),tN))
+    # # # fixme, make domain stripe parametric
+    # # N = x.shape[0]
+    # # x = z_tN
+    # # x = torch.cat([x, torch.tensor([tN]).repeat(N, 1)], dim=1)
+    # # x_domain_adjusted = adjust_tensor_to_domain(x=x, domain_stripe=[-1, 1])
+    # # x_domain_adjusted_min = torch.min(x_domain_adjusted, dim=0)
+    # # x_domain_adjusted_max = torch.max(x_domain_adjusted, dim=0)
+    # # Dx = x.shape[1]
+    # # ETT_fit.tt.set_core(Dx - 1)
+    # # f = ETT_fit(x=x_domain_adjusted)
+    # # z_tN_minus_h = z_tN - h * f  # euler step, but backward
+    # # t_vals = torch.tensor([t_N_minus_h, t0])
+    # # z_t, _ = odeint(func=trajectory_model, y0=(z_tN_minus_h.type(torch.float32), logp_diff_tN), t=t_vals)
+    # # z_t0_hat = z_t[-1]
+    # # logger.info(f'Finished hybrid trajectory computation')

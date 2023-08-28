@@ -28,9 +28,11 @@ from torch import Tensor
 from torch.optim import Optimizer
 
 from examples.models import HyperNetwork, CNF
+from utils import domain_adjust, is_domain_adjusted
 
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
+import pingouin as pg
 from sklearn.datasets import make_circles
 from torch.distributions import MultivariateNormal
 import torch
@@ -58,8 +60,18 @@ parser.add_argument('--results_dir', type=str, default="./results")
 # LNODE
 parser.add_argument('--distribution', type=str, choices=['circles', 'gauss3d', 'gauss4d', 'gauss6d', 'gauss10d'])
 parser.add_argument('--trajectory-opt', type=str, choices=['vanilla', 'hybrid'])
-args = parser.parse_args()
+parser.add_argument('--domain-adjust', default=False, action='store_true',
+                    help='Adjust domain of target random variable to a predefined range for Legendre polynomial and '
+                         'similar basis functions when using TT-ALS in Hybrid trajectory generation')
+# pass a list as cmd args
+# https://stackoverflow.com/a/32763023/5937273
+parser.add_argument('--domain', nargs='*', type=float, default=[-1, 1], help='domain to adjust target R.V to')
 
+args = parser.parse_args()
+# assertion for args
+
+assert isinstance(args.domain, list) and len(args.domain) == 2 and args.domain[0] < args.domain[1], \
+    f"domain must be of type list, len(list) = 2 and domain[0] < domain[1] , however we got domain = {args.domain}"
 if args.adjoint:
     from torchdiffeq import odeint_adjoint as odeint
 else:
@@ -187,6 +199,18 @@ if __name__ == '__main__':
             optimizer.zero_grad()
 
             x, logp_diff_t1 = get_batch(num_samples=args.num_samples, distribution_name=args.distribution)
+            if args.domain_adjust:
+                logger.info(f'Adjusting domain for target R.V to domain = {args.domain}')
+                x = domain_adjust(x=x, domain=[-1, 1])
+                x_np = x.detach().cpu().numpy()
+                assert is_domain_adjusted(x=x, domain=args.domain)  # FIXME, extra assertion,may need to remove
+                normality_test = pg.multivariate_normality(X=x_np)
+                if normality_test.normal:
+                    logger.info("Target R.V. pass HZ normality test after domain adjustment")
+                else:
+                    err_msg = "Target R.V. failed HZ normality test after domain adjustment"
+                    logger.error(err_msg)
+                    raise ValueError(err_msg)
             if args.trajectory_opt == "vanilla":
                 loss = vanilla_cnf_optimize_step(optimizer=optimizer, cnf_model=func, x=x, t0=args.t0, tN=args.t1,
                                                  logp_diff_tN=logp_diff_t1)
@@ -209,6 +233,8 @@ if __name__ == '__main__':
         results['args'] = vars(args)
         results['model'] = func.state_dict()
         results['loss_curve'] = loss_curve
+        results['domain_adjusted'] = args.domain_adjust
+        results['domain'] = args.domain
         artifact_version_name = f'{time_stamp}_dist_{target_distribution.__class__.__name__}_d_{in_out_dim}_niters_{args.niters}'
         pickle.dump(obj=results, file=open(f'artifacts/{args.trajectory_opt}_{artifact_version_name}.pkl', "wb"))
 
@@ -303,3 +329,13 @@ if __name__ == '__main__':
                      save_all=True, duration=250, loop=0)
 
         print('Saved visualization animation at {}'.format(os.path.join(args.results_dir, "cnf-viz.gif")))
+
+        """
+        Experiments Documentation 
+        
+        Experiment instance
+        =====
+        Tried to domain adjust x ( target R.V) before running CNF, didn't work
+        what happened ?
+        
+        """

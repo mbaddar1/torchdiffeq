@@ -19,6 +19,7 @@ python3 lnode/lnode_ttals_sub_experiment.py --artifact "lnode/artifacts/vanilla_
 import argparse
 import logging
 import pickle
+import random
 from typing import List
 
 import pingouin as pg
@@ -29,8 +30,15 @@ from GMSOC.functional_tt_fabrique import orthpoly, Extended_TensorTrain
 from examples.models import CNF
 from utils import domain_adjust
 
+# SEED
+SEED = 38473923
+np.random.seed(SEED)
+random.seed(SEED)
+torch.random.manual_seed(SEED)
+
 # Global Variables
 EPS = 1e-4
+EPS2 = 0.05
 # get logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
@@ -48,12 +56,13 @@ parser.add_argument('--tol', type=float, required=True)
 parser.add_argument('--n-samples', type=int, required=True)
 # pass a list as cmd args
 # https://stackoverflow.com/a/32763023/5937273
-parser.add_argument('--domain', nargs='*', type=float, default=[-1, 1], help='domain to adjust target R.V to')
+parser.add_argument('--domain-stripe', nargs='*', type=float, default=[-1, 1], help='domain to adjust target R.V to')
 
 # parser.add_argument('--t0-index', type=int, required=True)
 args = parser.parse_args()
 
-assert isinstance(args.domain, list) and len(args.domain) == 2 and args.domain[0] < args.domain[1], \
+assert isinstance(args.domain_stripe, list) and len(args.domain_stripe) == 2 and args.domain_stripe[0] < \
+       args.domain_stripe[1], \
     f"domain must be of type list, len(list) = 2 and domain[0] < domain[1] , however we got domain = {args.domain}"
 if args.adjoint:
     from torchdiffeq import odeint_adjoint as odeint
@@ -70,25 +79,65 @@ logger.info(f'Is CUDA device available? = {torch.cuda.is_available()}')
 logger.info(f'Device = {device}')
 
 
-def run_tt_als(x_aug: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float,
-               tol: float) -> dict:
-    N = x_aug.shape[0]
+def tt_rk_step(tN: float, z_tN: torch.Tensor, h: float, ETT_fits: List[Extended_TensorTrain],
+               domain_stripe: List[float]) -> dict:
+    """
+
+    :param tN:
+    :param z_tN:
+    :param h:
+    :param ETT_fits:
+    :return:
+    """
+    N = z_tN.size()[0]
+    Dz = z_tN.size()[1]
+    x = z_tN
+    x_aug = torch.cat(tensors=[x, torch.tensor(tN).repeat(N, 1)], dim=1)
+    x_aug_domain_adjusted = domain_adjust(x=x_aug, domain_stripe=domain_stripe)
+    assert is_domain_adjusted(x=x_aug_domain_adjusted, domain_stripe=domain_stripe)
+    assert len(ETT_fits) == Dz
+    Dx_aug = x_aug.size()[1]
+    assert Dx_aug == (Dz + 1)
+    fd_list = []
+
+    for d in range(Dz):
+        ETT_fits[d].tt.set_core(Dx_aug - 1)
+        fd = ETT_fits[d](x_aug_domain_adjusted)
+        fd_list.append(fd)
+    f = torch.cat(tensors=fd_list, dim=1)
+    z_tN_minus_h_pred = z_tN - h * f
+    return {'dzdt': f, 'z_tN_minus_h_pred': z_tN_minus_h_pred}
+
+
+def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float,
+               tol: float, domain_stripe: List[float]) -> dict:
+    """
+
+    :param domain_stripe:
+    :param x: pure x, no time
+    :param t:
+    :param y:
+    :param poly_degree:
+    :param rank:
+    :param test_ratio:
+    :param tol:
+    :return:
+    """
+    N = x.shape[0]
     N_test = int(test_ratio * N)
     N_train = N - N_test
-    #
-    # FIXME , rename to x_aug
-    x_aug = torch.cat(tensors=[x_aug, torch.tensor([t]).repeat(N, 1)], dim=1)
+
+    x_aug = torch.cat(tensors=[x, torch.tensor([t]).repeat(N, 1)], dim=1)
     Dx_aug = x_aug.shape[1]
     Dy = y.shape[1]
     #
     degrees = [poly_degree] * Dx_aug
     ranks = [1] + [rank] * (Dx_aug - 1) + [1]
     # order = len(degrees)  # not used, but for debugging only
-    domain = [args.domain for _ in range(Dx_aug)]
-    domain_stripe = domain[0]
+    domain = [domain_stripe for _ in range(Dx_aug)]
     op = orthpoly(degrees, domain)
-    x_domain_adjusted = domain_adjust(x=x_aug, domain=domain_stripe)
-    is_domain_adjusted(x=x_domain_adjusted, domain=domain_stripe)
+    x_aug_domain_adjusted = domain_adjust(x=x_aug, domain_stripe=domain_stripe)
+    is_domain_adjusted(x=x_aug_domain_adjusted, domain_stripe=domain_stripe)
     ETT_fits = [Extended_TensorTrain(op, ranks) for _ in range(Dy)]
     y_predicted_list = []
     mse_loss_fn = torch.nn.MSELoss()
@@ -99,7 +148,8 @@ def run_tt_als(x_aug: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int,
         iterations = 40
         rule = None
         # rule = tt.Dörfler_Adaptivity(delta = 1e-6,  maxranks = [32]*(n-1), dims = [feature_dim]*n, rankincr = 1)
-        ETT_fits[j].fit(x=x_domain_adjusted.type(torch.float64)[:N_train, :], y=y_d.type(torch.float64)[:N_train, :],
+        ETT_fits[j].fit(x=x_aug_domain_adjusted.type(torch.float64)[:N_train, :],
+                        y=y_d.type(torch.float64)[:N_train, :],
                         iterations=iterations, rule=rule, tol=tol,
                         verboselevel=1, reg_param=reg_coeff)
         ETT_fits[j].tt.set_core(Dx_aug - 1)
@@ -110,15 +160,15 @@ def run_tt_als(x_aug: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int,
         # val_error = (torch.norm(ETT_fits[j](x_domain_adjusted.type(torch.float64)[N_train:, :]) -
         #                         y_d.type(torch.float64)[N_train:, :]) ** 2 / torch.norm(
         #     y_d.type(torch.float64)[N_train:, :]) ** 2).item()
-        y_d_predict_train = ETT_fits[j](x_domain_adjusted.type(torch.float64)[:N_train, :])
-        y_d_predict_val = ETT_fits[j](x_domain_adjusted.type(torch.float64)[N_train:, :])
+        y_d_predict_train = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64)[:N_train, :])
+        y_d_predict_val = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64)[N_train:, :])
 
         train_rmse = torch.sqrt(mse_loss_fn(y_d_predict_train, y_d.type(torch.float64)[:N_train, :]))
         test_rmse = torch.sqrt(mse_loss_fn(y_d_predict_val, y_d.type(torch.float64)[N_train:, :]))
-        logger.info(f'For j ( d-th dim of y)  = {j} :TT-ALS Relative error on training set = {train_rmse}')
-        logger.info(f'For j (d-th dim of y)  = {j}: TT-ALS Relative error on test set = {test_rmse}')
+        logger.info(f'For j ( d-th dim of y)  = {j} :TT-ALS RMSE on training set = {train_rmse}')
+        logger.info(f'For j (d-th dim of y)  = {j}: TT-ALS RMSE on test set = {test_rmse}')
         #
-        y_d_predicted = ETT_fits[j](x_domain_adjusted.type(torch.float64))
+        y_d_predicted = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64))
         y_predicted_list.append(y_d_predicted)
         logger.info("======== Finished TT-ALS training ============")
     y_predicted = torch.cat(tensors=y_predicted_list, dim=1)
@@ -245,7 +295,7 @@ if __name__ == '__main__':
     z_t0_1 = z_t_trajectory_1[-1]
     ## Test the z(t0) generated from step(1) for normality and matching mio and Sigma
     z_t0_np_1 = z_t0_1.detach().numpy()
-    normality_test = pg.multivariate_normality(X=z_t0_np_1)
+    normality_test = pg.multivariate_normality(X=z_t0_np_1,alpha=0.1)
     assert normality_test.normal, ("z(t0) Generated using vanilla-CNF from z(t_N) ~ "
                                    "N(mio,Sigma) -> z(t_0) ^N(0,a.I) is not Normal")
     logger.info('Finished testing vanilla CNF Generative path z(tN) ~ N(mio,Sigma) -> z(t0) ~ N(0,a.I) : steps 1 and 2')
@@ -265,11 +315,24 @@ if __name__ == '__main__':
     # TT-ALS to find a model that maps z(tN) to z(tN-h) via RK-step (euler step)
     yy = (z_tN_minus_h - z_tN) / (-h)
     xx = z_tN
-    results = run_tt_als(x_aug=xx, t=tN, y=yy, poly_degree=args.degree, rank=args.rank, test_ratio=0.2, tol=args.tol)
+    results = run_tt_als(x=xx, t=tN, y=yy, poly_degree=args.degree, rank=args.rank, test_ratio=0.2, tol=args.tol,
+                         domain_stripe=args.domain_stripe)
     ETT_fits = results['ETT_fits']
     prediction_tot_rmse = results['prediction_tot_rmse']
     logger.info(
-        f'Finished TT-ALS with y=(z_tN_minus_h - z_tN) / (-h) and x = z_tN with prediction_tot_rmse  = {prediction_tot_rmse}')
+        f'Finished TT-ALS with y=(z_tN_minus_h - z_tN) / (-h) and x = z_tN with prediction_tot_rmse  = '
+        f'{prediction_tot_rmse}')
+    ## Step(4)
+    # make a backward tt-rk step
+    results = tt_rk_step(tN=tN, z_tN=z_tN, ETT_fits=ETT_fits, h=h, domain_stripe=args.domain_stripe)
+    f = results['dzdt']
+    z_tN_minus_h_pred = results['z_tN_minus_h_pred']
+    norm_err = torch.norm(z_tN_minus_h_pred - z_tN_minus_h).item()
+    assert norm_err <= EPS2, (f"z(tN-h) calculated from vanilla-CNF and tt-rk-step are not "
+                              f"close-enough.Norm-Error = {norm_err}")
+    logger.info(
+        f'Successfully Finished step(4) : '
+        f'Generated Close-Enough z(tN-h) from vanilla-CNF and tt-rk-euler step from z(tN) . Norm-Error = {norm_err}')
     ## Generate the
     #
     # # step(2). verify the distribution of the generated data

@@ -25,20 +25,21 @@ from typing import List
 import pingouin as pg
 import numpy as np
 import torch
+from torch.nn import MSELoss
+
 from utils import is_domain_adjusted
 from GMSOC.functional_tt_fabrique import orthpoly, Extended_TensorTrain
-from examples.models import CNF
+from examples.models import CNF, trace_df_dz_for_hybrid_trajectory
 from utils import domain_adjust
 
 # SEED
-SEED = 38473923
+SEED = 38473923  # FIXME , see other valid seed values for reproducing results
 np.random.seed(SEED)
 random.seed(SEED)
 torch.random.manual_seed(SEED)
 
 # Global Variables
 EPS = 1e-4
-EPS2 = 0.05
 # get logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
@@ -79,10 +80,12 @@ logger.info(f'Is CUDA device available? = {torch.cuda.is_available()}')
 logger.info(f'Device = {device}')
 
 
-def tt_rk_step(tN: float, z_tN: torch.Tensor, h: float, ETT_fits: List[Extended_TensorTrain],
+# noinspection PyShadowingNames
+def tt_rk_step(tN: float, z_tN: torch.Tensor, log_p_z_tN: torch.Tensor, h: float, ETT_fits: List[Extended_TensorTrain],
                domain_stripe: List[float]) -> dict:
     """
 
+    :param log_p_z_tN:
     :param tN:
     :param z_tN:
     :param h:
@@ -98,15 +101,54 @@ def tt_rk_step(tN: float, z_tN: torch.Tensor, h: float, ETT_fits: List[Extended_
     assert len(ETT_fits) == Dz
     Dx_aug = x_aug.size()[1]
     assert Dx_aug == (Dz + 1)
+    # f = dz/dt
     fd_list = []
-
+    dfd_dz_list = []
     for d in range(Dz):
         ETT_fits[d].tt.set_core(Dx_aug - 1)
         fd = ETT_fits[d](x_aug_domain_adjusted)
         fd_list.append(fd)
+        dfd_dz = ETT_fits[d].grad(x=x_aug)[:, :Dz]
+        dfd_dz_list.append(dfd_dz)
+    df_dz = torch.stack(tensors=dfd_dz_list, dim=1)
+    trace_df_dz = torch.vmap(torch.trace)(df_dz)
+    g = -trace_df_dz
     f = torch.cat(tensors=fd_list, dim=1)
     z_tN_minus_h_pred = z_tN - h * f
-    return {'dzdt': f, 'z_tN_minus_h_pred': z_tN_minus_h_pred}
+    log_p_ztN_minus_h_pred = log_p_z_tN.view(-1, 1) - h * g.view(-1, 1)
+    #
+    # # d log p(z(t)) /dt = -tr(df / dz ) = g
+    # # log p(z(tN-h)) = log p (z(tN)) - h * g
+    # # FIXME RuntimeError: One of the differentiated Tensors does not require grad
+    # #   https://discuss.pytorch.org/t/one-of-the-differentiated-tensors-does-not-require-grad/54694
+    # f_with_grad = torch.nn.Parameter(data=f)
+    # z_tN_with_grad = torch.nn.Parameter(data=z_tN)
+    # # FIXME , this assertion should be inside the tr(df/dz) function ??
+    # assert f_with_grad.requires_grad and z_tN_with_grad.requires_grad, \
+    #     "before calculating -tr(df/dz) with torch.autograd, f and z must have requires_grad = True"
+    #
+    # g = -trace_df_dz_for_hybrid_trajectory(f=f_with_grad, z=z_tN_with_grad)
+    # log_p_ztN_minus_h_pred = log_p_z_tN - h * g
+
+    return {'dzdt': f, 'z_tN_minus_h_pred': z_tN_minus_h_pred, 'log_p_ztN_minus_h_pred': log_p_ztN_minus_h_pred}
+
+
+# def generate_hybrid_zt_trajectory(z_tN: torch.Tensor, tN: float, t0: float, t_step: float, h: float,
+#                                   cnf_trajectory_model: CNF, ETT_fits: List[Extended_TensorTrain],
+#                                   domain_stripe: List[float]) -> dict:
+#     # sub-step 1 : generate first segment for the trajectory z(tN-h) from z(tN) using fitted ETT_fits
+#
+#     results_ = tt_rk_step(tN=tN, z_tN=z_tN, h=h, ETT_fits=ETT_fits, domain_stripe=domain_stripe)
+#     z_tN_minus_h_pred_ = results['z_tN_minus_h_pred']
+#     # TODO
+#     """
+#     How to calculate logp at t= tN-h using the tt-rk-step ?? , then compare it with the vanilla-CNF one
+#     """
+#     # subs-step 2 : generate second segment of the trajectory
+#     tN_minus_h_ = tN - h
+#     t_vals_ = torch.tensor(np.arange(tN_minus_h_, t0 - t_step, -t_step))
+#
+#     z_t_trajectory, logp_diff_trajectory = odeint(func=cnf_trajectory_model, y0=())
 
 
 def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float,
@@ -295,7 +337,7 @@ if __name__ == '__main__':
     z_t0_1 = z_t_trajectory_1[-1]
     ## Test the z(t0) generated from step(1) for normality and matching mio and Sigma
     z_t0_np_1 = z_t0_1.detach().numpy()
-    normality_test = pg.multivariate_normality(X=z_t0_np_1,alpha=0.1)
+    normality_test = pg.multivariate_normality(X=z_t0_np_1, alpha=0.1)
     assert normality_test.normal, ("z(t0) Generated using vanilla-CNF from z(t_N) ~ "
                                    "N(mio,Sigma) -> z(t_0) ^N(0,a.I) is not Normal")
     logger.info('Finished testing vanilla CNF Generative path z(tN) ~ N(mio,Sigma) -> z(t0) ~ N(0,a.I) : steps 1 and 2')
@@ -324,15 +366,31 @@ if __name__ == '__main__':
         f'{prediction_tot_rmse}')
     ## Step(4)
     # make a backward tt-rk step
-    results = tt_rk_step(tN=tN, z_tN=z_tN, ETT_fits=ETT_fits, h=h, domain_stripe=args.domain_stripe)
+    results = tt_rk_step(tN=tN, z_tN=z_tN, log_p_z_tN=logp_diff_tN, ETT_fits=ETT_fits, h=h,
+                         domain_stripe=args.domain_stripe)
     f = results['dzdt']
     z_tN_minus_h_pred = results['z_tN_minus_h_pred']
-    norm_err = torch.norm(z_tN_minus_h_pred - z_tN_minus_h).item()
-    assert norm_err <= EPS2, (f"z(tN-h) calculated from vanilla-CNF and tt-rk-step are not "
-                              f"close-enough.Norm-Error = {norm_err}")
+    log_p_ztN_minus_h_pred = results['log_p_ztN_minus_h_pred']
+    mse_val = MSELoss()(z_tN_minus_h_pred, z_tN_minus_h)
+    assert mse_val <= EPS, (f"z(tN-h) calculated from vanilla-CNF and tt-rk-step are not "
+                            f"close-enough. mse_error = {mse_val}")
     logger.info(
         f'Successfully Finished step(4) : '
-        f'Generated Close-Enough z(tN-h) from vanilla-CNF and tt-rk-euler step from z(tN) . Norm-Error = {norm_err}')
+        f'Generated Close-Enough z(tN-h) from vanilla-CNF and tt-rk-euler step from z(tN) . MSE = {mse_val}')
+
+    ## Step(5)
+    # Similar to step (2), except that z(tN-h) is not extracted from vanilla-CNF trajctory but from
+    # TT-ALS fitted model prediction
+    logger.info('Running Step 5 : Generate Hybrid Trajectory from z(tN) to z(t0) using TT-RK-Euler '
+                'step from z(tN) to z(tN-h) and vanilla CNF from z(tN-h) to z(t0) ')
+    z_t_trajectory_hybrid, logp_diff_hybrid = odeint(func=trajectory_model,
+                                                     y0=(z_tN_minus_h_pred.type(torch.float32),
+                                                         log_p_ztN_minus_h_pred.type(torch.float32)), t=t_vals_2)
+    z_t0_hybrid = z_t_trajectory_hybrid[-1]
+    normality_test_z_t0_hybrid = pg.multivariate_normality(X=z_t0_hybrid.detach().cpu().numpy())
+    mse_val = MSELoss()(z_t0_hybrid, z_t0_1)
+    assert mse_val < EPS, f"z(t0)_hybrid is not close enough to z(t0)_vanilla , MSE = {mse_val}"
+    logger.info('Successfully finished step (5) : ')
     ## Generate the
     #
     # # step(2). verify the distribution of the generated data

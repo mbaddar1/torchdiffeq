@@ -2,12 +2,27 @@ import torch
 from torch import nn
 
 
+def trace_df_dz_for_hybrid_trajectory(f, z):
+    """Calculates the trace of the Jacobian df/dz.
+    Stolen from: https://github.com/rtqichen/ffjord/blob/master/lib/layers/odefunc.py#L13
+    """
+    sum_diag = 0.
+    for i in range(z.shape[1]):
+        tmp = torch.autograd.grad(f[:, i].sum(), z, create_graph=True,allow_unused=True)
+        sum_diag += torch.autograd.grad(f[:, i].sum(), z, create_graph=True,allow_unused=True)[0].contiguous()[:, i].contiguous()
+
+    return sum_diag.contiguous()
+
+
 def trace_df_dz(f, z):
     """Calculates the trace of the Jacobian df/dz.
     Stolen from: https://github.com/rtqichen/ffjord/blob/master/lib/layers/odefunc.py#L13
     """
     sum_diag = 0.
     for i in range(z.shape[1]):
+        # fixme, remove when finishes debugging
+        # tmp1 = f[:, i].sum()
+        # tmp2 = torch.autograd.grad(f[:, i].sum(), z, create_graph=True)
         sum_diag += torch.autograd.grad(f[:, i].sum(), z, create_graph=True)[0].contiguous()[:, i].contiguous()
 
     return sum_diag.contiguous()

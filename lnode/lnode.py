@@ -78,15 +78,16 @@ else:
     from torchdiffeq import odeint
 
 
-def trace_df_dz(f, z):
-    """Calculates the trace of the Jacobian df/dz.
-    Stolen from: https://github.com/rtqichen/ffjord/blob/master/lib/layers/odefunc.py#L13
-    """
-    sum_diag = 0.
-    for i in range(z.shape[1]):
-        sum_diag += torch.autograd.grad(f[:, i].sum(), z, create_graph=True)[0].contiguous()[:, i].contiguous()
-
-    return sum_diag.contiguous()
+# moved to examples.models.trace_df_dz for more modularity
+# def trace_df_dz(f, z):
+#     """Calculates the trace of the Jacobian df/dz.
+#     Stolen from: https://github.com/rtqichen/ffjord/blob/master/lib/layers/odefunc.py#L13
+#     """
+#     sum_diag = 0.
+#     for i in range(z.shape[1]):
+#         sum_diag += torch.autograd.grad(f[:, i].sum(), z, create_graph=True)[0].contiguous()[:, i].contiguous()
+#
+#     return sum_diag.contiguous()
 
 
 class RunningAverageMeter(object):

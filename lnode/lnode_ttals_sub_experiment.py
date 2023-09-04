@@ -281,13 +281,14 @@ if __name__ == '__main__':
     ## step(1). Generate samples out of the loaded model and meta-data
     ##  then generate z(t0) by odeint z(tN) -> z(t0) and test z(t0) for normality
     z_tN = artifact['target_distribution'].sample(torch.Size([args.n_samples])).to(device)
-    logp_diff_tN = torch.zeros(args.n_samples, 1).type(torch.float32).to(device)
+    logp_ztN_dt = torch.zeros(args.n_samples, 1).type(torch.float32).to(device)
     t0 = artifact['args']['t0']
     tN = artifact['args']['t1']
     t_vals_1 = torch.tensor(list(np.arange(tN, t0 - 1, -1)))
     logger.info(f'Running CNF trajectory')
-    z_t_trajectory_1, logp_diff_1 = odeint(func=trajectory_model, y0=(z_tN, logp_diff_tN), t=t_vals_1)
+    z_t_trajectory_1, logp_dzdt_trajectory_1 = odeint(func=trajectory_model, y0=(z_tN, logp_ztN_dt), t=t_vals_1)
     z_t0_1 = z_t_trajectory_1[-1]
+    logp_zt0_pred_1 = logp_dzdt_trajectory_1[-1]
     ## Test the z(t0) generated from step(1) for normality and matching mio and Sigma
     z_t0_np_1 = z_t0_1.detach().numpy()
     normality_test = pg.multivariate_normality(X=z_t0_np_1, alpha=0.1)
@@ -297,7 +298,7 @@ if __name__ == '__main__':
     ## step(2) get z(tN-h) and generate z(t0) using vanilla-CNF from z(tN-h) -> z(t0)
     tN_minus_h = t_vals_1[args.h_steps].item()
     z_tN_minus_h = z_t_trajectory_1[args.h_steps]
-    logp_diff_tN_minus_h = logp_diff_1[args.h_steps]
+    logp_diff_tN_minus_h = logp_dzdt_trajectory_1[args.h_steps]
     h = tN - tN_minus_h
     assert h > 0, "h must be > 0"
     t_vals_2 = torch.tensor(list(np.arange(tN_minus_h, t0 - 1, -1)))
@@ -320,7 +321,7 @@ if __name__ == '__main__':
         f'{prediction_tot_rmse}')
     ## Step(4)
     # make a backward tt-rk step
-    tt_rk_backward_step_results = tt_rk_step(t=tN, z=z_tN, log_p_z=logp_diff_tN, ETT_fits=ETT_fits, h=h,
+    tt_rk_backward_step_results = tt_rk_step(t=tN, z=z_tN, log_p_z=logp_ztN_dt, ETT_fits=ETT_fits, h=h,
                                              domain_stripe=args.domain_stripe, direction="backward")
     f = tt_rk_backward_step_results['dzdt']
     z_tN_minus_h_pred = tt_rk_backward_step_results['z_prime']
@@ -348,8 +349,8 @@ if __name__ == '__main__':
     logger.info('Successfully finished step (5): flat code to generate z(t0) from hybrid trajectory (TT-RK + NN-CNF) '
                 'from (ztN) thru z(tN-h) and should be close enough to z(t0) generated from z(tN) via vanilla-CNF')
     #
-    logger.info('Starting Step(6) : Testing Hybrid Trajectory Generation function')
-    results = generate_hybrid_cnf_trajectory(z_start=z_tN, logp_zstart=logp_diff_tN, h=h,
+    logger.info(f'Starting Step(6) : Testing Hybrid Trajectory Generation function from tN = {tN} to t0 = {t0}')
+    results = generate_hybrid_cnf_trajectory(z_start=z_tN, logp_zstart=logp_ztN_dt, h=h,
                                              ETT_fits=ETT_fits,
                                              nn_cnf_model=trajectory_model,
                                              t_start=tN,
@@ -363,9 +364,14 @@ if __name__ == '__main__':
     t_hybrid = results['t']
 
     z_t0_hybrid_2 = zt_hybrid_trajectory[-1]
-    mse_val = MSELoss()(z_t0_hybrid_2, z_t0_1)
+    log_zt0_hybrid = logp_zt[-1]
+    mse_val_z0_hybrid = MSELoss()(z_t0_hybrid_2, z_t0_1)
+    mse_val_logp_z0_hybrid = MSELoss()(log_zt0_hybrid, logp_zt0_pred_1)
+    assert mse_val_z0_hybrid < EPS  # and mse_val_logp_z0_hybrid < EPS
+    # TODO should we check MSE for log also, does it make sense ?
+    logger.info(
+        f'Finished Step(6) with mse(z(t0)) = {mse_val_z0_hybrid} and mse(log(p(z0))) = {mse_val_logp_z0_hybrid}')
 
-    assert mse_val < EPS
     ## Generate the
     #
     # # step(2). verify the distribution of the generated data

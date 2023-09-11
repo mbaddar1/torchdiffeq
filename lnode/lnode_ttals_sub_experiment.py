@@ -20,6 +20,7 @@ import argparse
 import logging
 import pickle
 import random
+import sys
 from typing import List
 
 import pingouin as pg
@@ -39,7 +40,7 @@ random.seed(SEED)
 torch.random.manual_seed(SEED)
 
 # Global Variables
-EPS = 1e-4
+EPS = 1e-3
 # get logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
@@ -134,7 +135,7 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
     is_domain_adjusted(x=x_aug_domain_adjusted, domain_stripe=domain_stripe)
     ETT_fits = [Extended_TensorTrain(op, ranks) for _ in range(Dy)]
     y_predicted_list = []
-    mse_loss_fn = torch.nn.MSELoss()
+
     for j in range(Dy):
         y_d = y[:, j].view(-1, 1)
         # ALS parameters
@@ -157,8 +158,8 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
         y_d_predict_train = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64)[:N_train, :])
         y_d_predict_val = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64)[N_train:, :])
 
-        train_rmse = torch.sqrt(mse_loss_fn(y_d_predict_train, y_d.type(torch.float64)[:N_train, :]))
-        test_rmse = torch.sqrt(mse_loss_fn(y_d_predict_val, y_d.type(torch.float64)[N_train:, :]))
+        train_rmse = torch.sqrt(MSELoss()(y_d_predict_train, y_d.type(torch.float64)[:N_train, :]))
+        test_rmse = torch.sqrt(MSELoss()(y_d_predict_val, y_d.type(torch.float64)[N_train:, :]))
         logger.info(f'For j ( d-th dim of y)  = {j} :TT-ALS RMSE on training set = {train_rmse}')
         logger.info(f'For j (d-th dim of y)  = {j}: TT-ALS RMSE on test set = {test_rmse}')
         #
@@ -166,7 +167,7 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, ran
         y_predicted_list.append(y_d_predicted)
         logger.info("======== Finished TT-ALS training ============")
     y_predicted = torch.cat(tensors=y_predicted_list, dim=1)
-    prediction_tot_rmse = torch.sqrt(mse_loss_fn(y, y_predicted))
+    prediction_tot_rmse = torch.sqrt(MSELoss()(y, y_predicted))
     return {'ETT_fits': ETT_fits, 'prediction_tot_rmse': prediction_tot_rmse}
 
 
@@ -277,79 +278,105 @@ if __name__ == '__main__':
     trajectory_model.load_state_dict(artifact['model'])
     logger.info(f'Successfully loaded CNF model and Meta data')
 
-    # Verify normality of generated data
+    # Verify the normality of generated data
     ## step(1). Generate samples out of the loaded model and meta-data
     ##  then generate z(t0) by odeint z(tN) -> z(t0) and test z(t0) for normality
     z_tN = artifact['target_distribution'].sample(torch.Size([args.n_samples])).to(device)
     logp_ztN_dt = torch.zeros(args.n_samples, 1).type(torch.float32).to(device)
     t0 = artifact['args']['t0']
     tN = artifact['args']['t1']
-    t_vals_1 = torch.tensor(list(np.arange(tN, t0 - 1, -1)))
-    logger.info(f'Running CNF trajectory')
-    z_t_trajectory_1, logp_dzdt_trajectory_1 = odeint(func=trajectory_model, y0=(z_tN, logp_ztN_dt), t=t_vals_1)
-    z_t0_1 = z_t_trajectory_1[-1]
-    logp_zt0_pred_1 = logp_dzdt_trajectory_1[-1]
+    t_vals_vanilla = torch.tensor(list(np.arange(tN, t0 - 1, -1)))
+    logger.info(f'Step 1 : Running vanilla CNF/ODE trajectory generation from z(tN) to z(t0) ')
+    z_t_trajectory_vanilla, logp_dzdt_trajectory_vanilla = (
+        odeint(func=trajectory_model, y0=(z_tN, logp_ztN_dt), t=t_vals_vanilla))
+    z_t0_vanilla = z_t_trajectory_vanilla[-1]
+    logp_zt0_pred_vanilla = logp_dzdt_trajectory_vanilla[-1]
     ## Test the z(t0) generated from step(1) for normality and matching mio and Sigma
-    z_t0_np_1 = z_t0_1.detach().numpy()
-    normality_test = pg.multivariate_normality(X=z_t0_np_1, alpha=0.1)
+    z_t0_np_vanilla = z_t0_vanilla.detach().numpy()
+    normality_test = pg.multivariate_normality(X=z_t0_np_vanilla, alpha=0.1)
     assert normality_test.normal, ("z(t0) Generated using vanilla-CNF from z(t_N) ~ "
                                    "N(mio,Sigma) -> z(t_0) ^N(0,a.I) is not Normal")
-    logger.info('Finished testing vanilla CNF Generative path z(tN) ~ N(mio,Sigma) -> z(t0) ~ N(0,a.I) : steps 1 and 2')
-    ## step(2) get z(tN-h) and generate z(t0) using vanilla-CNF from z(tN-h) -> z(t0)
-    tN_minus_h = t_vals_1[args.h_steps].item()
-    z_tN_minus_h = z_t_trajectory_1[args.h_steps]
-    logp_diff_tN_minus_h = logp_dzdt_trajectory_1[args.h_steps]
+
+    mean_log_p_z0_vanilla = torch.mean(artifact['base_distribution'].
+                                       log_prob(z_t0_vanilla.to(torch.device('cuda:0'))), dim=0).item()
+    logger.info(f'Step 1: mean log-prob for z0 generated from vanilla CNF = {mean_log_p_z0_vanilla}')
+    logger.info('Step 1: Finished')
+    ## ******************
+
+    # FIXME, to remove Step(*) redundant to remove
+    #  get z(tN-h) and generate z(t0) using vanilla-CNF from z(tN-h) -> z(t0)
+    # logger.info('Step 2 : Do ODESOLVE from Z9')
+    # tN_minus_h = t_vals_1[args.h_steps].item()
+    # z_tN_minus_h = z_t_trajectory_vanilla[args.h_steps]
+    # logp_diff_tN_minus_h = logp_dzdt_trajectory_vanilla[args.h_steps]
+    # h = tN - tN_minus_h
+    # assert h > 0, "h must be > 0"
+    # # naming after step-2
+    # t_vals_2 = torch.tensor(list(np.arange(tN_minus_h, t0 - 1, -1)))
+    # z_t_trajectory_2, logp_diff_2 = odeint(func=trajectory_model, y0=(z_tN_minus_h, logp_diff_tN_minus_h),
+    #                                        t=t_vals_2)
+    # z_t0_2 = z_t_trajectory_2[-1]
+    # rmse_2 = torch.sqrt(MSELoss()(z_t0_vanilla,z_t0_2)).item()
+    # logger.info(f'Step')
+
+    ## step(2)
+    # TT-ALS to find a model that maps z(tN) to z(tN-h) via RK-step (euler step)
+    logger.info('Step 2 : TT-ALS between y_tt = (z_tN-z_tN_minus_h) / (h) and x_tt = [z_tN,t_N]')
+    logp_diff_tN_minus_h = logp_dzdt_trajectory_vanilla[args.h_steps]
+    tN_minus_h = t_vals_vanilla[args.h_steps].item()
+    z_tN_minus_h_vanilla = z_t_trajectory_vanilla[args.h_steps]
     h = tN - tN_minus_h
     assert h > 0, "h must be > 0"
-    t_vals_2 = torch.tensor(list(np.arange(tN_minus_h, t0 - 1, -1)))
-    z_t_trajectory_2, logp_diff_2 = odeint(func=trajectory_model, y0=(z_tN_minus_h, logp_diff_tN_minus_h), t=t_vals_2)
-    z_t0_2 = z_t_trajectory_2[-1]
-    diff_ = torch.norm(z_t0_1 - z_t0_2)
-    logger.info(f'Finished testing vanilla CNF Generative path  z(tN-h) ~ N(mio,Sigma) -> z(t0) ~ N(0,a.I) : step 2')
-
-    ## step(3)
-    # TT-ALS to find a model that maps z(tN) to z(tN-h) via RK-step (euler step)
-    yy = (z_tN_minus_h - z_tN) / (-h)
+    yy = (z_tN - z_tN_minus_h_vanilla) / h
     xx = z_tN
-    tt_rk_backward_step_results = run_tt_als(x=xx, t=tN, y=yy, poly_degree=args.degree, rank=args.rank, test_ratio=0.2,
-                                             tol=args.tol,
-                                             domain_stripe=args.domain_stripe)
-    ETT_fits = tt_rk_backward_step_results['ETT_fits']
-    prediction_tot_rmse = tt_rk_backward_step_results['prediction_tot_rmse']
+    tt_als_results = run_tt_als(x=xx, t=tN, y=yy, poly_degree=args.degree, rank=args.rank, test_ratio=0.2,
+                                tol=args.tol,
+                                domain_stripe=args.domain_stripe)
+    ETT_fits = tt_als_results['ETT_fits']
+    prediction_tot_rmse = tt_als_results['prediction_tot_rmse']
     logger.info(
-        f'Finished TT-ALS with y=(z_tN_minus_h - z_tN) / (-h) and x = z_tN with prediction_tot_rmse  = '
-        f'{prediction_tot_rmse}')
-    ## Step(4)
+        f'Finished TT-ALS with y=(z_tN-z_tN_minus_h) / (h) and x = z_tN with prediction_tot_rmse  = '
+        f'{prediction_tot_rmse}\n'
+        f'===============================================')
+    ## ******************
+
+    # Step(3)
     # make a backward tt-rk step
-    tt_rk_backward_step_results = tt_rk_step(t=tN, z=z_tN, log_p_z=logp_ztN_dt, ETT_fits=ETT_fits, h=h,
-                                             domain_stripe=args.domain_stripe, direction="backward")
-    f = tt_rk_backward_step_results['dzdt']
-    z_tN_minus_h_pred = tt_rk_backward_step_results['z_prime']
+    logger.info('Step (3) : Backward TT-RK(euler) step')
+    tt_rk_step_results = tt_rk_step(t=tN, z=z_tN, log_p_z=logp_ztN_dt, ETT_fits=ETT_fits, h=h,
+                                    domain_stripe=args.domain_stripe, direction="backward")
+    f = tt_rk_step_results['dzdt']
+    z_tN_minus_h_pred = tt_rk_step_results['z_prime']
 
-    mse_val = MSELoss()(z_tN_minus_h_pred, z_tN_minus_h)
-    assert mse_val <= EPS, (f"z(tN-h) calculated from vanilla-CNF and tt-rk-step are not "
-                            f"close-enough. mse_error = {mse_val}")
+    rmse_val_3 = torch.sqrt(MSELoss()(z_tN_minus_h_pred, z_tN_minus_h_vanilla)).item()
+    assert rmse_val_3 <= EPS, (f"z(tN-h) calculated from vanilla-CNF and tt-rk-step are not "
+                               f"close-enough:  RMSE = {rmse_val_3} > EPS = {EPS}")
     logger.info(
-        f'Successfully Finished step(4) : '
-        f'Generated Close-Enough z(tN-h) from vanilla-CNF and tt-rk-euler step from z(tN) . MSE = {mse_val}')
+        f'Successfully Finished step(3) : with RMSE(z(tN-h)_vanilla,'
+        f'z(tN-h)_tt_rk = {rmse_val_3} <= EPS = {EPS}\n=======================================')
 
-    ## Step(5)
-    # Similar to step (2), except that z(tN-h) is not extracted from vanilla-CNF trajctory but from
-    # TT-ALS fitted model prediction
-    logger.info('Running Step 5 : Generate Hybrid Trajectory from z(tN) to z(t0) using TT-RK-Euler '
-                'step from z(tN) to z(tN-h) and vanilla CNF from z(tN-h) to z(t0) ')
-    log_p_ztN_minus_h_pred = tt_rk_backward_step_results['log_p_z_prime']
-    z_t_trajectory_hybrid, logp_diff_hybrid = odeint(func=trajectory_model,
-                                                     y0=(z_tN_minus_h_pred.type(torch.float32),
-                                                         log_p_ztN_minus_h_pred.type(torch.float32)), t=t_vals_2)
-    z_t0_hybrid = z_t_trajectory_hybrid[-1]
-    normality_test_z_t0_hybrid = pg.multivariate_normality(X=z_t0_hybrid.detach().cpu().numpy())
-    mse_val = MSELoss()(z_t0_hybrid, z_t0_1)
-    assert mse_val < EPS, f"z(t0)_hybrid is not close enough to z(t0)_vanilla , MSE = {mse_val}"
-    logger.info('Successfully finished step (5): flat code to generate z(t0) from hybrid trajectory (TT-RK + NN-CNF) '
-                'from (ztN) thru z(tN-h) and should be close enough to z(t0) generated from z(tN) via vanilla-CNF')
+    ## Step(4)
+    # Hybrid trajectory Generation
+    # i) z(tN)->z(tN-h) using TT-RK(Euler) Step
+    # # ii) z(tN-h) using vanilla CNF model
+    # # note : t_{N-1} = t_N - h , i.e. h= t_N-t_{N-1}
+    # logger.info('Running Step 4 : Generate Hybrid Trajectory from z(tN) to z(t0) : first using TT-RK-Euler '
+    #             'step from z(tN) to z(tN-h) then vanilla CNF from z(tN-h) to z(t0) ')
+    # t_vals_4 = torch.tensor(list(np.arange(tN_minus_h, t0 - 1, -1))) # named after the step number
+    # log_p_ztN_minus_h_pred = tt_als_results['log_p_z_prime']
+    # z_t_trajectory_hybrid, logp_diff_hybrid = odeint(func=trajectory_model,
+    #                                                  y0=(z_tN_minus_h_pred.type(torch.float32),
+    #                                                      log_p_ztN_minus_h_pred.type(torch.float32)),
+    #                                                  t=t_vals_4)
+    # z_t0_hybrid = z_t_trajectory_hybrid[-1]
+    # normality_test_z_t0_hybrid = pg.multivariate_normality(X=z_t0_hybrid.detach().cpu().numpy())
+    # rmse_val_4 = torch.sqrt(MSELoss()(z_t0_hybrid, z_t0_vanilla))
+    # assert rmse_val_4 < EPS, (f"z(t0)_hybrid is not close enough to z(t0)_vanilla , "
+    #                           f"RMSE = {rmse_val_4} > EPS = {EPS}")
     #
-    logger.info(f'Starting Step(6) : Testing Hybrid Trajectory Generation function from tN = {tN} to t0 = {t0}')
+    # logger.info(f'Successfully finished step (4) with RMSE = {rmse_val_4} <= EPS = {EPS}')
+    # #
+    # logger.info(f'Starting Step(6) : Testing Hybrid Trajectory Generation function from tN = {tN} to t0 = {t0}')
     results = generate_hybrid_cnf_trajectory(z_start=z_tN, logp_zstart=logp_ztN_dt, h=h,
                                              ETT_fits=ETT_fits,
                                              nn_cnf_model=trajectory_model,
@@ -359,21 +386,39 @@ if __name__ == '__main__':
                                              domain_stripe=args.domain_stripe,
                                              adjoint=args.adjoint)
     # {'zt': zt, 'logp_zt': logp_zt, 't': t_vals}
+    logger.info('Running Step 4 : Generate Hybrid Trajectory from z(tN) to z(t0) : first using TT-RK-Euler '
+                'step from z(tN) to z(tN-h) then vanilla CNF from z(tN-h) to z(t0) ')
     zt_hybrid_trajectory = results['zt']
     logp_zt = results['logp_zt']
     t_hybrid = results['t']
-
-    z_t0_hybrid_2 = zt_hybrid_trajectory[-1]
+    z_t0_hybrid = zt_hybrid_trajectory[-1]
     log_zt0_hybrid = logp_zt[-1]
-    mse_val_z0_hybrid = MSELoss()(z_t0_hybrid_2, z_t0_1)
-    mse_val_logp_z0_hybrid = MSELoss()(log_zt0_hybrid, logp_zt0_pred_1)
-    assert mse_val_z0_hybrid < EPS  # and mse_val_logp_z0_hybrid < EPS
-    # TODO should we check MSE for log also, does it make sense ?
-    logger.info(
-        f'Finished Step(6) with mse(z(t0)) = {mse_val_z0_hybrid} and mse(log(p(z0))) = {mse_val_logp_z0_hybrid}')
+    rmse_val_z0_hybrid = torch.sqrt(MSELoss()(z_t0_hybrid, z_t0_vanilla))
+    mse_val_logp_z0_hybrid = MSELoss()(log_zt0_hybrid, logp_zt0_pred_vanilla)
+    assert rmse_val_z0_hybrid < EPS, (f"RMSE for z(t0) generated from vanilla CNF and "
+                                      f"Hybrid TT+NN CNF = {rmse_val_z0_hybrid} > EPS = {EPS}")
+    logger.info(f"Finished Step (4) successfully : RMSE for z(t0) generated from vanilla CNF and "
+                f"Hybrid TT+NN CNF = {rmse_val_z0_hybrid} > EPS = {EPS}")
 
-    ## Generate the
+    # Step (5) compare log-prob
+
+    logger.info('Step (5) : Evaluating log(p(z(t0)) from vanilla and Hybrid CNF')
+
+    mean_log_p_z0_hybrid = torch.mean(artifact['base_distribution']
+                                      .log_prob(z_t0_hybrid.to(torch.device('cuda:0'))), dim=0).item()
+    logger.info(f'log(p(z(t0))) vanilla and hybrid = {mean_log_p_z0_vanilla}, {mean_log_p_z0_hybrid}')
+    # sys.exit(-1)
     #
+    # # TODO should we check MSE for log also, does it make sense ?
+    # mean_log_p_z0_hybrid = torch.mean(artifact['base_distribution']
+    #                                   .log_prob(z_t0_hybrid.to(torch.device('cuda:0'))), dim=0).item()
+    # logger.info(f'mean log-p(z(t0)) hybrid = {mean_log_p_z0_hybrid}')
+    # logger.info(
+    #     f'Finished hybrid ode trajectory generation with mse(z(t0)) = {mse_val_z0_hybrid} and mse(log(p(z0))) = '
+    #     f'{mse_val_logp_z0_hybrid}')
+    #
+    # ## Generate the
+    # #
     # # step(2). verify the distribution of the generated data
     # ## 2.1 Using HZ test
     # z_t0_hat = z_t[-1]

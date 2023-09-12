@@ -394,9 +394,10 @@ if __name__ == '__main__':
     z_t0_hybrid = zt_hybrid_trajectory[-1]
     log_zt0_hybrid = logp_zt[-1]
     rmse_val_z0_hybrid = torch.sqrt(MSELoss()(z_t0_hybrid, z_t0_vanilla))
-    mse_val_logp_z0_hybrid = MSELoss()(log_zt0_hybrid, logp_zt0_pred_vanilla)
+    # mse_val_logp_z0_hybrid = MSELoss()(log_zt0_hybrid, logp_zt0_pred_vanilla)
     assert rmse_val_z0_hybrid < EPS, (f"RMSE for z(t0) generated from vanilla CNF and "
                                       f"Hybrid TT+NN CNF = {rmse_val_z0_hybrid} > EPS = {EPS}")
+
     logger.info(f"Finished Step (4) successfully : RMSE for z(t0) generated from vanilla CNF and "
                 f"Hybrid TT+NN CNF = {rmse_val_z0_hybrid} > EPS = {EPS}")
 
@@ -407,6 +408,45 @@ if __name__ == '__main__':
     mean_log_p_z0_hybrid = torch.mean(artifact['base_distribution']
                                       .log_prob(z_t0_hybrid.to(torch.device('cuda:0'))), dim=0).item()
     logger.info(f'log(p(z(t0))) vanilla and hybrid = {mean_log_p_z0_vanilla}, {mean_log_p_z0_hybrid}')
+    logger.info(f'Step(5) Finished\n=============================')
+    # Step 6 Evaluating the closeness between sample z(t0) vanilla , hybrid and the base distribution
+    logger.info(
+        f'Starting Step(6) :Evaluating the closeness between sample z(t0) '
+        f'vanilla , hybrid and the base distribution')
+    # vanilla
+    normality_test_z0_vanilla = pg.multivariate_normality(z_t0_vanilla.detach().numpy())
+    sample_mean_z0_vanilla = torch.mean(z_t0_vanilla, dim=0)
+    sample_cov_z0_vanilla = torch.cov(z_t0_vanilla.T)
+
+    logger.info(f'Normality test results for z(0) vanilla = {normality_test_z0_vanilla}')
+    z0_vanilla_mean_rmse = torch.sqrt(
+        MSELoss()(sample_mean_z0_vanilla,
+                  artifact['base_distribution'].mean.to(torch.device('cpu'))))
+    z0_vanilla_cov_rmse = torch.sqrt(
+        MSELoss()(torch.diagonal(sample_cov_z0_vanilla),
+                  artifact['base_distribution'].variance.to(torch.device('cpu'))))
+    logger.info(f'RMSE between base-dist. mean and sample mean for z(t0) vanilla = {z0_vanilla_mean_rmse}')
+    logger.info(f'RMSE between base-dist. variance and sample variance for z(t0) vanilla = {z0_vanilla_cov_rmse}')
+
+    logger.info('---')
+    # hybrid
+    normality_test_z0_hybrid = pg.multivariate_normality(z_t0_hybrid.detach().numpy())
+    logger.info(f'Normality test results for z(0) hybrid = {normality_test_z0_hybrid}')
+
+    sample_mean_z0_hybrid = torch.mean(z_t0_hybrid, dim=0)
+    sample_cov_z0_hybrid = torch.cov(z_t0_hybrid.T)
+
+    z0_hybrid_mean_rmse = torch.sqrt(
+        MSELoss()(sample_mean_z0_hybrid,
+                  artifact['base_distribution'].mean.to(torch.device('cpu'))))
+    z0_hybrid_cov_rmse = torch.sqrt(
+        MSELoss()(torch.diagonal(sample_cov_z0_hybrid),
+                  artifact['base_distribution'].variance.to(torch.device('cpu'))))
+
+    logger.info(f'RMSE between base-dist. mean and sample mean for z(t0) hybrid = {z0_hybrid_mean_rmse}')
+    logger.info(f'RMSE between base-dist. variance and sample variance for z(t0) hybrid = {z0_hybrid_cov_rmse}')
+
+    logger.info(f'finished step(6)')
     # sys.exit(-1)
     #
     # # TODO should we check MSE for log also, does it make sense ?

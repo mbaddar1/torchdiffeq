@@ -12,6 +12,9 @@ python3 lnode/lnode.py --niters 1000 --distribution gauss6d --t0 0 --t1 10 --tra
 
 2)Train a LNODE model [TBD]
 
+Sample Running command line CMD line
+/home/mbaddar/mbaddar/phd/torchdiffeq/venv310/bin/python /home/mbaddar/mbaddar/phd/torchdiffeq/lnode/lnode.py --niters 1000 --distribution gauss4d --t0 0 --t1 10 --trajectory-opt vanilla
+
 """
 import logging
 import os
@@ -19,16 +22,15 @@ import argparse
 import glob
 import pickle
 from datetime import datetime
-from typing import Union, Tuple, Any
+from typing import Union, Any
 
 from PIL import Image
 import numpy as np
 import matplotlib
 from torch import Tensor
-from torch.optim import Optimizer
 
-from examples.models import HyperNetwork, CNF
-from utils import domain_adjust, is_domain_adjusted
+from examples.models import CNF
+from utils import domain_adjust, is_domain_adjusted, vanilla_cnf_optimize_step, get_ETT_fits, hybrid_cnf_optimize_step
 
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
@@ -37,6 +39,12 @@ from sklearn.datasets import make_circles
 from torch.distributions import MultivariateNormal
 import torch
 import torch.optim as optim
+import random
+
+# SEED
+SEED = 41
+torch.manual_seed(SEED)
+random.seed(SEED)
 
 # Global Variables
 DIM_DIST_MAP = {'circles': 2, 'gauss3d': 3, 'gauss4d': 4, 'gauss6d': 6, 'gauss10d': 10}
@@ -144,29 +152,6 @@ def get_batch(num_samples: int, distribution_name: str) -> tuple[Tensor | Any, A
     return x, logp_diff_t1
 
 
-def vanilla_cnf_optimize_step(optimizer: Optimizer, cnf_model: torch.nn.Module, x: torch.Tensor, t0: float, tN: float,
-                              logp_diff_tN: torch.Tensor) -> torch.Tensor:
-    # 1) Zero the weights
-    optimizer.zero_grad()
-    # 2) Forward /odeint
-    z_t, logp_diff_t = odeint(
-        cnf_model,
-        (x, logp_diff_tN),
-        torch.tensor([tN, t0]).type(torch.float32).to(device),
-        atol=1e-5,
-        rtol=1e-5,
-        method='dopri5',
-    )
-    z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
-    logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
-    loss = -logp_x.mean(0)
-    # 3) Backward (adjoint if odeint is attached to ode_adjoint)
-    loss.backward()
-    # 4) Update parameters
-    optimizer.step()
-    return loss
-
-
 if __name__ == '__main__':
     # dump args
     logger.info(f'Args:\n{args}')
@@ -179,8 +164,12 @@ if __name__ == '__main__':
     time_stamp = datetime.now().isoformat()
     # -------
     # Model
-    func = CNF(in_out_dim=in_out_dim, hidden_dim=args.hidden_dim, width=args.width, device=device)
-    optimizer = optim.Adam(func.parameters(), lr=args.lr)
+    nn_cnf_func = CNF(in_out_dim=in_out_dim, hidden_dim=args.hidden_dim, width=args.width, device=device)
+    ETT_fits = get_ETT_fits(D_in=in_out_dim + 1, D_out=in_out_dim, rank=3, domain_stripe=[-1, 1], poly_degree=3,
+                            device=device)
+    # optimizer
+    optimizer = optim.Adam(nn_cnf_func.parameters(), lr=args.lr)
+    # Base distribution
     p_z0 = base_distribution
     loss_meter = RunningAverageMeter()
     loss_curve = []
@@ -191,7 +180,7 @@ if __name__ == '__main__':
         ckpt_path = os.path.join(args.train_dir, 'ckpt.pth')
         if os.path.exists(ckpt_path):
             checkpoint = torch.load(ckpt_path)
-            func.load_state_dict(checkpoint['func_state_dict'])
+            nn_cnf_func.load_state_dict(checkpoint['func_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             print('Loaded ckpt from {}'.format(ckpt_path))
 
@@ -213,10 +202,14 @@ if __name__ == '__main__':
                     logger.error(err_msg)
                     raise ValueError(err_msg)
             if args.trajectory_opt == "vanilla":
-                loss = vanilla_cnf_optimize_step(optimizer=optimizer, cnf_model=func, x=x, t0=args.t0, tN=args.t1,
-                                                 logp_diff_tN=logp_diff_t1)
+                loss = vanilla_cnf_optimize_step(optimizer=optimizer, nn_cnf_model=nn_cnf_func, x=x, t0=args.t0,
+                                                 tN=args.t1, logp_diff_tN=logp_diff_t1, adjoint=args.adjoint,
+                                                 p_z0=p_z0, device=device)
             elif args.trajectory_opt == "hybrid":
-                pass
+                loss = hybrid_cnf_optimize_step(optimizer=optimizer, nn_cnf_model=nn_cnf_func, ETT_fits=ETT_fits, x=x,
+                                                t0=args.t0,
+                                                tN=args.t1, logp_ztN=logp_diff_t1, adjoint=args.adjoint, p_z0=p_z0,
+                                                device=device, h=2, domain_stripe=[-1, 1])
             else:
                 raise ValueError(f"Unknown trajectory optimization method = {args.trajectory_opt}")
             loss_meter.update(loss.item())
@@ -232,7 +225,7 @@ if __name__ == '__main__':
         results['niters'] = args.niters
         results['loss'] = loss_meter.avg
         results['args'] = vars(args)
-        results['model'] = func.state_dict()
+        results['model'] = nn_cnf_func.state_dict()
         results['loss_curve'] = loss_curve
         results['domain_adjusted'] = args.domain_adjust
         results['domain'] = args.domain
@@ -243,7 +236,7 @@ if __name__ == '__main__':
         if args.train_dir is not None:
             ckpt_path = os.path.join(args.train_dir, 'ckpt.pth')
             torch.save({
-                'func_state_dict': func.state_dict(),
+                'func_state_dict': nn_cnf_func.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
             }, ckpt_path)
             print('Stored ckpt at {}'.format(ckpt_path))
@@ -262,7 +255,7 @@ if __name__ == '__main__':
             logp_diff_t0 = torch.zeros(viz_samples, 1).type(torch.float32).to(device)
 
             z_t_samples, _ = odeint(
-                func,
+                nn_cnf_func,
                 (z_t0, logp_diff_t0),
                 torch.tensor(np.linspace(args.t0, args.t1, viz_timesteps)).to(device),
                 atol=1e-5,
@@ -279,7 +272,7 @@ if __name__ == '__main__':
             logp_diff_t1 = torch.zeros(z_t1.shape[0], 1).type(torch.float32).to(device)
 
             z_t_density, logp_diff_t = odeint(
-                func,
+                nn_cnf_func,
                 (z_t1, logp_diff_t1),
                 torch.tensor(np.linspace(args.t1, args.t0, viz_timesteps)).to(device),
                 atol=1e-5,

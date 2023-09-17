@@ -2,8 +2,10 @@ from typing import List, Iterable
 
 import numpy as np
 import torch
+from torch.nn import MSELoss
+from torch.optim import Optimizer
 from examples.models import CNF
-from GMSOC.functional_tt_fabrique import Extended_TensorTrain
+from GMSOC.functional_tt_fabrique import Extended_TensorTrain, orthpoly
 
 # Global variables
 
@@ -112,10 +114,9 @@ def ETT_fits_predict(ETT_fits: List[Extended_TensorTrain], z: torch.Tensor, t: f
                      domain_stripe: List[float]) -> torch.Tensor:
     N = z.size()[0]
     Dz = z.size()[1]
-
-    z_aug = torch.cat(tensors=[z, torch.tensor(t).repeat(N, 1)], dim=1)
+    z_device = z.get_device()
+    z_aug = torch.cat(tensors=[z, torch.tensor(t).repeat(N, 1).to(z_device)], dim=1)
     Dz_aug = z_aug.size()[1]
-
     z_aug_domain_adjusted = domain_adjust(x=z_aug, domain_stripe=domain_stripe)
     assert is_domain_adjusted(x=z_aug_domain_adjusted, domain_stripe=domain_stripe)
     assert len(ETT_fits) == Dz
@@ -180,7 +181,8 @@ def ETT_fits_trace_grad(ETT_fits: List[Extended_TensorTrain], z: torch.Tensor, t
                         domain_stripe: List[float]) -> torch.Tensor:
     N = z.size()[0]
     Dz = z.size()[1]
-    z_aug = torch.cat(tensors=[z, torch.tensor(t).repeat(N, 1)], dim=1)
+    z_device = z.get_device()
+    z_aug = torch.cat(tensors=[z, torch.tensor(t).repeat(N, 1).to(z_device)], dim=1)
     Dz_aug = Dz + 1
 
     z_aug_domain_adjusted = domain_adjust(x=z_aug, domain_stripe=domain_stripe)
@@ -199,3 +201,145 @@ def ETT_fits_trace_grad(ETT_fits: List[Extended_TensorTrain], z: torch.Tensor, t
     df_dz = torch.stack(df_dz_list, dim=1)
     trace_df_dz = torch.vmap(torch.trace)(df_dz)
     return trace_df_dz
+
+
+def vanilla_cnf_optimize_step(optimizer: Optimizer, nn_cnf_model: torch.nn.Module, x: torch.Tensor, t0: float,
+                              tN: float,
+                              logp_diff_tN: torch.Tensor, adjoint: bool,
+                              p_z0: torch.distributions.Distribution, device: torch.device) -> torch.Tensor:
+    """
+
+    :param device:
+    :param optimizer:
+    :param nn_cnf_model:
+    :param x:
+    :param t0:
+    :param tN:
+    :param logp_diff_tN:
+    :param adjoint:
+    :param p_z0:
+    :return:
+    """
+    # 1) Zero the weights
+    optimizer.zero_grad()
+    # 2) Forward /odeint
+    # FIXME, is that the best way to do this ?
+    if adjoint:
+        from torchdiffeq import odeint_adjoint as odeint
+    else:
+        from torchdiffeq import odeint
+    z_t, logp_diff_t = odeint(
+        nn_cnf_model,
+        (x, logp_diff_tN),
+        torch.tensor([tN, t0]).type(torch.float32).to(device),
+        atol=1e-5,
+        rtol=1e-5,
+        method='dopri5',
+    )
+    z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
+    logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
+    loss = -logp_x.mean(0)
+    # 3) Backward (adjoint if odeint is attached to ode_adjoint)
+    loss.backward()
+    # 4) Update parameters
+    optimizer.step()
+    return loss
+
+
+def hybrid_cnf_optimize_step(optimizer: Optimizer, nn_cnf_model: torch.nn.Module, x: torch.Tensor, t0: float,
+                             tN: float, ETT_fits: List[Extended_TensorTrain],
+                             logp_ztN: torch.Tensor, adjoint: bool,
+                             p_z0: torch.distributions.Distribution, device: torch.device, h: float,
+                             domain_stripe: List[float]) -> torch.Tensor:
+    """
+
+    :param domain_stripe:
+    :param ETT_fits:
+    :param logp_ztN:
+    :param h:
+    :param optimizer:
+    :param nn_cnf_model:
+    :param x:
+    :param t0:
+    :param tN:
+    :param adjoint:
+    :param p_z0:
+    :param device:
+    :return:
+    """
+    # 1) Zero the weights
+    optimizer.zero_grad()
+    # 2) Forward /odeint
+    # FIXME, is that the best way to do this ?
+    if adjoint:
+        from torchdiffeq import odeint_adjoint as odeint
+    else:
+        from torchdiffeq import odeint
+    # the extra tt-rk-step
+    ztN = x
+
+    tt_rk_step_result = tt_rk_step(t=tN, h=h, z=ztN, log_p_z=logp_ztN, ETT_fits=ETT_fits, direction='backward',
+                                   domain_stripe=domain_stripe)
+    ztN_minus_h = tt_rk_step_result['z_prime']
+
+    logp_ztN_minus_h = tt_rk_step_result['log_p_z_prime']
+    # FIXME, debug code. To Remove
+    rmse_z = MSELoss()(ztN, ztN_minus_h)
+    rmse_logpz = MSELoss()(logp_ztN, logp_ztN_minus_h)
+    # ---
+    tN_minus_h = tN - h
+    assert not ztN_minus_h.requires_grad, "the starting z(t_N - h) should have requires_grad = False"
+    z_t, logp_diff_t = odeint(
+        nn_cnf_model,
+        (ztN_minus_h, logp_ztN_minus_h),
+        torch.tensor([tN_minus_h, t0]).type(torch.float32).to(device),
+        atol=1e-5,
+        rtol=1e-5,
+        method='dopri5',
+    )
+    z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
+    logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
+    loss = -logp_x.mean(0)
+    # 3) Backward (adjoint if odeint is attached to ode_adjoint)
+    loss.backward()
+    # 4) Update parameters
+    optimizer.step()
+    return loss
+
+
+def get_ETT_fits(D_in: int, D_out: int, rank: int, domain_stripe: List[float], poly_degree: int, device: torch.device):
+    """
+
+    :param D_in:
+    :param D_out:
+    :param rank:
+    :param domain_stripe:
+    :param poly_degree:
+    :param device:
+    :return:
+    """
+    degrees = [poly_degree] * D_in
+    ranks = [1] + [rank] * (D_in - 1) + [1]
+    # order = len(degrees)  # not used, but for debugging only
+    domain = [domain_stripe for _ in range(D_in)]
+    op = orthpoly(degrees, domain, device)
+    ETT_fits = [Extended_TensorTrain(op, ranks, device) for _ in range(D_out)]
+    return ETT_fits
+
+"""
+Some experimental notes for the function lnode.utils.hybrid_cnf_optimize_step 
+
+Training the NN trajectory while Keeping the TT part fixed , with different h values for the TT-RK step
+
+h       niter       loss(begin)         loss(end)
+0       1000        4.07                0.34
+1       1000        17.12               2.14
+2       1000        47.7                3.613
+
+---
+For vanilla CNF :   lnode.utils.vanilla_cnf_optimize_step
+h       niter       loss(begin)         loss(end)
+*       1000        4.07                0.34
+
+Note that for h=0 in hybrid(lnode) with h=0 and vanilla, the loss(begin) and loss(end) are equal
+"""

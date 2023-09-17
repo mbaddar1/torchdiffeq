@@ -418,6 +418,8 @@ if __name__ == '__main__':
     sample_mean_z0_vanilla = torch.mean(z_t0_vanilla, dim=0)
     sample_cov_z0_vanilla = torch.cov(z_t0_vanilla.T)
 
+
+
     logger.info(f'Normality test results for z(0) vanilla = {normality_test_z0_vanilla}')
     z0_vanilla_mean_rmse = torch.sqrt(
         MSELoss()(sample_mean_z0_vanilla,

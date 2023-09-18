@@ -28,7 +28,7 @@ import numpy as np
 import torch
 from torch.nn import MSELoss
 
-from utils import is_domain_adjusted, tt_rk_step, generate_hybrid_cnf_trajectory
+from utils import is_domain_adjusted, tt_rk_step, generate_hybrid_cnf_trajectory, run_tt_als, get_ETTs
 from GMSOC.functional_tt_fabrique import orthpoly, Extended_TensorTrain
 from examples.models import CNF
 from utils import domain_adjust
@@ -81,7 +81,6 @@ else:
 logger.info(f'Is CUDA device available? = {torch.cuda.is_available()}')
 logger.info(f'Device = {device}')
 
-
 # noinspection PyShadowingNames
 
 
@@ -102,73 +101,6 @@ logger.info(f'Device = {device}')
 #     t_vals_ = torch.tensor(np.arange(tN_minus_h_, t0 - t_step, -t_step))
 #
 #     z_t_trajectory, logp_diff_trajectory = odeint(func=cnf_trajectory_model, y0=())
-
-
-def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, poly_degree: int, rank: int, test_ratio: float,
-               tol: float, domain_stripe: List[float]) -> dict:
-    """
-
-    :param domain_stripe:
-    :param x: pure x, no time
-    :param t:
-    :param y:
-    :param poly_degree:
-    :param rank:
-    :param test_ratio:
-    :param tol:
-    :return:
-    """
-    N = x.shape[0]
-    N_test = int(test_ratio * N)
-    N_train = N - N_test
-
-    x_aug = torch.cat(tensors=[x, torch.tensor([t]).repeat(N, 1)], dim=1)
-    Dx_aug = x_aug.shape[1]
-    Dy = y.shape[1]
-    #
-    degrees = [poly_degree] * Dx_aug
-    ranks = [1] + [rank] * (Dx_aug - 1) + [1]
-    # order = len(degrees)  # not used, but for debugging only
-    domain = [domain_stripe for _ in range(Dx_aug)]
-    op = orthpoly(degrees, domain)
-    x_aug_domain_adjusted = domain_adjust(x=x_aug, domain_stripe=domain_stripe)
-    is_domain_adjusted(x=x_aug_domain_adjusted, domain_stripe=domain_stripe)
-    ETT_fits = [Extended_TensorTrain(op, ranks) for _ in range(Dy)]
-    y_predicted_list = []
-
-    for j in range(Dy):
-        y_d = y[:, j].view(-1, 1)
-        # ALS parameters
-        reg_coeff = 1e-2
-        iterations = 40
-        rule = None
-        # rule = tt.Dörfler_Adaptivity(delta = 1e-6,  maxranks = [32]*(n-1), dims = [feature_dim]*n, rankincr = 1)
-        ETT_fits[j].fit(x=x_aug_domain_adjusted.type(torch.float64)[:N_train, :],
-                        y=y_d.type(torch.float64)[:N_train, :],
-                        iterations=iterations, rule=rule, tol=tol,
-                        verboselevel=1, reg_param=reg_coeff)
-        ETT_fits[j].tt.set_core(Dx_aug - 1)
-        # train_error = (torch.norm(ETT_fits[j](x_domain_adjusted.type(torch.float64)[:N_train, :]) -
-        #                           y_d.type(torch.float64)[:N_train, :]) ** 2 / torch.norm(
-        #     y_d.type(torch.float64)[:N_train, :]) ** 2).item()
-        #
-        # val_error = (torch.norm(ETT_fits[j](x_domain_adjusted.type(torch.float64)[N_train:, :]) -
-        #                         y_d.type(torch.float64)[N_train:, :]) ** 2 / torch.norm(
-        #     y_d.type(torch.float64)[N_train:, :]) ** 2).item()
-        y_d_predict_train = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64)[:N_train, :])
-        y_d_predict_val = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64)[N_train:, :])
-
-        train_rmse = torch.sqrt(MSELoss()(y_d_predict_train, y_d.type(torch.float64)[:N_train, :]))
-        test_rmse = torch.sqrt(MSELoss()(y_d_predict_val, y_d.type(torch.float64)[N_train:, :]))
-        logger.info(f'For j ( d-th dim of y)  = {j} :TT-ALS RMSE on training set = {train_rmse}')
-        logger.info(f'For j (d-th dim of y)  = {j}: TT-ALS RMSE on test set = {test_rmse}')
-        #
-        y_d_predicted = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64))
-        y_predicted_list.append(y_d_predicted)
-        logger.info("======== Finished TT-ALS training ============")
-    y_predicted = torch.cat(tensors=y_predicted_list, dim=1)
-    prediction_tot_rmse = torch.sqrt(MSELoss()(y, y_predicted))
-    return {'ETT_fits': ETT_fits, 'prediction_tot_rmse': prediction_tot_rmse}
 
 
 # FIXME ToDelete The following function
@@ -329,10 +261,14 @@ if __name__ == '__main__':
     assert h > 0, "h must be > 0"
     yy = (z_tN - z_tN_minus_h_vanilla) / h
     xx = z_tN
-    tt_als_results = run_tt_als(x=xx, t=tN, y=yy, poly_degree=args.degree, rank=args.rank, test_ratio=0.2,
-                                tol=args.tol,
+    D_in = xx.size()[1] + 1
+    D_out = xx.size()[1]
+    xx_device = xx.get_device() if xx.is_cuda else torch.device('cpu')
+    ETT_fits = get_ETTs(D_in=D_in, D_out=D_out, rank=args.rank, domain_stripe=args.domain_stripe,
+                        poly_degree=args.degree, device=xx_device)
+    tt_als_results = run_tt_als(x=xx, t=tN, y=yy, ETT_fits=ETT_fits, test_ratio=0.2, tol=args.tol,
                                 domain_stripe=args.domain_stripe)
-    ETT_fits = tt_als_results['ETT_fits']
+    # ETT_fits = tt_als_results['ETT_fits']
     prediction_tot_rmse = tt_als_results['prediction_tot_rmse']
     logger.info(
         f'Finished TT-ALS with y=(z_tN-z_tN_minus_h) / (h) and x = z_tN with prediction_tot_rmse  = '
@@ -417,8 +353,6 @@ if __name__ == '__main__':
     normality_test_z0_vanilla = pg.multivariate_normality(z_t0_vanilla.detach().numpy())
     sample_mean_z0_vanilla = torch.mean(z_t0_vanilla, dim=0)
     sample_cov_z0_vanilla = torch.cov(z_t0_vanilla.T)
-
-
 
     logger.info(f'Normality test results for z(0) vanilla = {normality_test_z0_vanilla}')
     z0_vanilla_mean_rmse = torch.sqrt(

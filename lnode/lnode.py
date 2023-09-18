@@ -30,7 +30,7 @@ import matplotlib
 from torch import Tensor
 
 from examples.models import CNF
-from utils import domain_adjust, is_domain_adjusted, vanilla_cnf_optimize_step, get_ETT_fits, hybrid_cnf_optimize_step
+from utils import domain_adjust, is_domain_adjusted, vanilla_cnf_optimize_step, get_ETTs, hybrid_cnf_optimize_step
 
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
@@ -68,9 +68,9 @@ parser.add_argument('--results_dir', type=str, default="./results")
 # LNODE
 parser.add_argument('--distribution', type=str, choices=['circles', 'gauss3d', 'gauss4d', 'gauss6d', 'gauss10d'])
 parser.add_argument('--trajectory-opt', type=str, choices=['vanilla', 'hybrid'])
-parser.add_argument('--domain-adjust', default=False, action='store_true',
-                    help='Adjust domain of target random variable to a predefined range for Legendre polynomial and '
-                         'similar basis functions when using TT-ALS in Hybrid trajectory generation')
+# parser.add_argument('--domain-adjust', default=True, action='store_true',
+#                     help='Adjust domain of target random variable to a predefined range for Legendre polynomial and '
+#                          'similar basis functions when using TT-ALS in Hybrid trajectory generation')
 # pass a list as cmd args
 # https://stackoverflow.com/a/32763023/5937273
 parser.add_argument('--domain', nargs='*', type=float, default=[-1, 1], help='domain to adjust target R.V to')
@@ -156,8 +156,9 @@ if __name__ == '__main__':
     # dump args
     logger.info(f'Args:\n{args}')
     # Configs
-    device = torch.device('cuda:' + str(args.gpu)
-                          if torch.cuda.is_available() else 'cpu')
+    # device = torch.device('cuda:' + str(args.gpu)
+    #                       if torch.cuda.is_available() else 'cpu')
+    device = torch.device('cpu')
     in_out_dim = DIM_DIST_MAP[args.distribution]
     base_distribution = MultivariateNormal(loc=torch.zeros(in_out_dim).to(device),
                                            covariance_matrix=0.1 * torch.eye(in_out_dim).to(device))
@@ -165,14 +166,15 @@ if __name__ == '__main__':
     # -------
     # Model
     nn_cnf_func = CNF(in_out_dim=in_out_dim, hidden_dim=args.hidden_dim, width=args.width, device=device)
-    ETT_fits = get_ETT_fits(D_in=in_out_dim + 1, D_out=in_out_dim, rank=3, domain_stripe=[-1, 1], poly_degree=3,
-                            device=device)
+    ETT_fits = get_ETTs(D_in=in_out_dim + 1, D_out=in_out_dim, rank=4, domain_stripe=[-1, 1], poly_degree=4,
+                        device=device)
     # optimizer
     optimizer = optim.Adam(nn_cnf_func.parameters(), lr=args.lr)
     # Base distribution
     p_z0 = base_distribution
     loss_meter = RunningAverageMeter()
-    loss_curve = []
+    loss_running_avg_curve = []
+    loss_raw_curve = []
 
     if args.train_dir is not None:
         if not os.path.exists(args.train_dir):
@@ -189,18 +191,18 @@ if __name__ == '__main__':
             optimizer.zero_grad()
 
             x, logp_diff_t1 = get_batch(num_samples=args.num_samples, distribution_name=args.distribution)
-            if args.domain_adjust:
-                logger.info(f'Adjusting domain for target R.V to domain = {args.domain}')
-                x = domain_adjust(x=x, domain=[-1, 1])
-                x_np = x.detach().cpu().numpy()
-                assert is_domain_adjusted(x=x, domain=args.domain)  # FIXME, extra assertion,may need to remove
-                normality_test = pg.multivariate_normality(X=x_np)
-                if normality_test.normal:
-                    logger.info("Target R.V. pass HZ normality test after domain adjustment")
-                else:
-                    err_msg = "Target R.V. failed HZ normality test after domain adjustment"
-                    logger.error(err_msg)
-                    raise ValueError(err_msg)
+            # if args.domain_adjust:
+            #     logger.info(f'Adjusting domain for target R.V to domain = {args.domain}')
+            #     x = domain_adjust(x=x, domain_stripe=[-1, 1])
+            #     x_np = x.detach().cpu().numpy()
+            #     assert is_domain_adjusted(x=x, domain_stripe=args.domain)  # FIXME, extra assertion,may need to remove
+            #     normality_test = pg.multivariate_normality(X=x_np)
+            #     if normality_test.normal:
+            #         logger.info("Target R.V. pass HZ normality test after domain adjustment")
+            #     else:
+            #         err_msg = "Target R.V. failed HZ normality test after domain adjustment"
+            #         logger.error(err_msg)
+            #         raise ValueError(err_msg)
             if args.trajectory_opt == "vanilla":
                 loss = vanilla_cnf_optimize_step(optimizer=optimizer, nn_cnf_model=nn_cnf_func, x=x, t0=args.t0,
                                                  tN=args.t1, logp_diff_tN=logp_diff_t1, adjoint=args.adjoint,
@@ -209,12 +211,20 @@ if __name__ == '__main__':
                 loss = hybrid_cnf_optimize_step(optimizer=optimizer, nn_cnf_model=nn_cnf_func, ETT_fits=ETT_fits, x=x,
                                                 t0=args.t0,
                                                 tN=args.t1, logp_ztN=logp_diff_t1, adjoint=args.adjoint, p_z0=p_z0,
-                                                device=device, h=2, domain_stripe=[-1, 1])
+                                                device=device, h=1, domain_stripe=[-1, 1], itr=itr)
             else:
                 raise ValueError(f"Unknown trajectory optimization method = {args.trajectory_opt}")
-            loss_meter.update(loss.item())
-            loss_curve.append(loss_meter.avg)
-            print('Iter: {}, running avg loss: {:.4f}'.format(itr, loss_meter.avg))
+            loss_raw_curve.append(loss.item())
+            if itr > 10:
+                my_avg = np.nanmean(loss_raw_curve[-10:])
+            else:
+                my_avg = np.nanmean(loss_raw_curve)
+            loss_running_avg_curve.append(my_avg)
+            if my_avg < 0.05:
+                break
+            # loss_meter.update(my_avg)
+
+            print('Iter: {}, running avg loss: {:.4f}, raw loss = {:.4f}'.format(itr, my_avg, loss.item()))
         logger.info('Finished training, dumping experiment results')
         results = dict()
         results['trajectory-opt'] = args.trajectory_opt
@@ -226,9 +236,10 @@ if __name__ == '__main__':
         results['loss'] = loss_meter.avg
         results['args'] = vars(args)
         results['model'] = nn_cnf_func.state_dict()
-        results['loss_curve'] = loss_curve
-        results['domain_adjusted'] = args.domain_adjust
-        results['domain'] = args.domain
+        results['loss_curve'] = loss_running_avg_curve
+        results['loss_curve_raw'] = loss_raw_curve
+        # results['domain_adjusted'] = args.domain_adjust
+        # results['domain'] = args.domain
         artifact_version_name = f'{time_stamp}_dist_{target_distribution.__class__.__name__}_d_{in_out_dim}_niters_{args.niters}'
         pickle.dump(obj=results, file=open(f'artifacts/{args.trajectory_opt}_{artifact_version_name}.pkl', "wb"))
 

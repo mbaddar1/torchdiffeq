@@ -1,9 +1,12 @@
+import logging
 from typing import List, Iterable
 
 import numpy as np
 import torch
 from torch.nn import MSELoss
 from torch.optim import Optimizer
+
+from GMSOC.tt_fabrique import TensorTrain
 from examples.models import CNF
 from GMSOC.functional_tt_fabrique import Extended_TensorTrain, orthpoly
 
@@ -64,6 +67,78 @@ def is_domain_adjusted(x: torch.Tensor, domain_stripe: List[float], eps: float =
     return True
 
 
+def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, ETT_fits: List[Extended_TensorTrain], test_ratio: float,
+               tol: float, domain_stripe: List[float]) -> dict:
+    """
+
+    :param ETT_fits:
+    :param domain_stripe:
+    :param x: pure x, no time
+    :param t:
+    :param y:
+    :param test_ratio:
+    :param tol:
+    :return:
+    """
+    logger = logging.getLogger()
+    N = x.shape[0]
+    N_test = int(test_ratio * N)
+    N_train = N - N_test
+    x_device = x.get_device() if x.is_cuda else torch.device('cpu')
+    x_aug = torch.cat(tensors=[x, torch.tensor([t]).repeat(N, 1).to(x_device)], dim=1)
+    Dx_aug = x_aug.shape[1]
+    Dy = y.shape[1]
+    #
+    # degrees = [poly_degree] * Dx_aug
+    # ranks = [1] + [rank] * (Dx_aug - 1) + [1]
+    # order = len(degrees)  # not used, but for debugging only
+    # domain = [domain_stripe for _ in range(Dx_aug)]
+    # op = orthopoly(degrees, domain, device=x_device)
+    x_aug_domain_adjusted = domain_adjust(x=x_aug, domain_stripe=domain_stripe)
+    is_domain_adjusted(x=x_aug_domain_adjusted, domain_stripe=domain_stripe)
+    assert len(ETT_fits) == Dy, "len(ETT_fits) must be equal to Dy"
+    for i, ETT_fit in enumerate(ETT_fits):
+        assert isinstance(ETT_fit, Extended_TensorTrain), (f"ETT_fit {i} must be of type "
+                                                           f"{Extended_TensorTrain.__class__.__name__},"
+                                                           f"found {type(ETT_fit)} ")
+    # ETT_fits = [Extended_TensorTrain(op, ranks, device=x_device) for _ in range(Dy)]
+    y_predicted_list = []
+
+    for j in range(Dy):
+        y_d = y[:, j].view(-1, 1)
+        # ALS parameters
+        reg_coeff = 1e-2
+        iterations = 40
+        rule = None
+        # rule = tt.Dörfler_Adaptivity(delta = 1e-6,  maxranks = [32]*(n-1), dims = [feature_dim]*n, rankincr = 1)
+        ETT_fits[j].fit(x=x_aug_domain_adjusted.type(torch.float64)[:N_train, :],
+                        y=y_d.type(torch.float64)[:N_train, :],
+                        iterations=iterations, rule=rule, tol=tol,
+                        verboselevel=1, reg_param=reg_coeff)
+        ETT_fits[j].tt.set_core(Dx_aug - 1)
+        # train_error = (torch.norm(ETT_fits[j](x_domain_adjusted.type(torch.float64)[:N_train, :]) -
+        #                           y_d.type(torch.float64)[:N_train, :]) ** 2 / torch.norm(
+        #     y_d.type(torch.float64)[:N_train, :]) ** 2).item()
+        #
+        # val_error = (torch.norm(ETT_fits[j](x_domain_adjusted.type(torch.float64)[N_train:, :]) -
+        #                         y_d.type(torch.float64)[N_train:, :]) ** 2 / torch.norm(
+        #     y_d.type(torch.float64)[N_train:, :]) ** 2).item()
+        y_d_predict_train = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64)[:N_train, :])
+        y_d_predict_val = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64)[N_train:, :])
+
+        train_rmse = torch.sqrt(MSELoss()(y_d_predict_train, y_d.type(torch.float64)[:N_train, :]))
+        test_rmse = torch.sqrt(MSELoss()(y_d_predict_val, y_d.type(torch.float64)[N_train:, :]))
+        logger.info(f'For j ( d-th dim of y)  = {j} :TT-ALS RMSE on training set = {train_rmse}')
+        logger.info(f'For j (d-th dim of y)  = {j}: TT-ALS RMSE on test set = {test_rmse}')
+        #
+        y_d_predicted = ETT_fits[j](x_aug_domain_adjusted.type(torch.float64))
+        y_predicted_list.append(y_d_predicted)
+        logger.info("======== Finished TT-ALS training ============")
+    y_predicted = torch.cat(tensors=y_predicted_list, dim=1)
+    prediction_tot_rmse = torch.sqrt(MSELoss()(y, y_predicted))
+    return {'prediction_tot_rmse': prediction_tot_rmse}
+
+
 def tt_rk_step(t: float, z: torch.Tensor, log_p_z: torch.Tensor, h: float, ETT_fits: List[Extended_TensorTrain],
                direction: str, domain_stripe: List[float]) -> dict:
     """
@@ -114,7 +189,10 @@ def ETT_fits_predict(ETT_fits: List[Extended_TensorTrain], z: torch.Tensor, t: f
                      domain_stripe: List[float]) -> torch.Tensor:
     N = z.size()[0]
     Dz = z.size()[1]
-    z_device = z.get_device()
+    if z.is_cuda:
+        z_device = z.get_device()
+    else:
+        z_device = torch.device('cpu')
     z_aug = torch.cat(tensors=[z, torch.tensor(t).repeat(N, 1).to(z_device)], dim=1)
     Dz_aug = z_aug.size()[1]
     z_aug_domain_adjusted = domain_adjust(x=z_aug, domain_stripe=domain_stripe)
@@ -181,7 +259,7 @@ def ETT_fits_trace_grad(ETT_fits: List[Extended_TensorTrain], z: torch.Tensor, t
                         domain_stripe: List[float]) -> torch.Tensor:
     N = z.size()[0]
     Dz = z.size()[1]
-    z_device = z.get_device()
+    z_device = z.get_device() if z.is_cuda else torch.device('cpu')
     z_aug = torch.cat(tensors=[z, torch.tensor(t).repeat(N, 1).to(z_device)], dim=1)
     Dz_aug = Dz + 1
 
@@ -250,9 +328,10 @@ def hybrid_cnf_optimize_step(optimizer: Optimizer, nn_cnf_model: torch.nn.Module
                              tN: float, ETT_fits: List[Extended_TensorTrain],
                              logp_ztN: torch.Tensor, adjoint: bool,
                              p_z0: torch.distributions.Distribution, device: torch.device, h: float,
-                             domain_stripe: List[float]) -> torch.Tensor:
+                             domain_stripe: List[float], itr: int) -> torch.Tensor:
     """
 
+    :param itr:
     :param domain_stripe:
     :param ETT_fits:
     :param logp_ztN:
@@ -267,17 +346,39 @@ def hybrid_cnf_optimize_step(optimizer: Optimizer, nn_cnf_model: torch.nn.Module
     :param device:
     :return:
     """
-    # 1) Zero the weights
-    optimizer.zero_grad()
-    # 2) Forward /odeint
+
     # FIXME, is that the best way to do this ?
     if adjoint:
         from torchdiffeq import odeint_adjoint as odeint
     else:
         from torchdiffeq import odeint
+    # --- Start of function code ---
+    itr_threshold = 50
+    if itr < itr_threshold:
+        loss = vanilla_cnf_optimize_step(optimizer=optimizer, nn_cnf_model=nn_cnf_model, x=x, t0=t0, tN=tN,
+                                         logp_diff_tN=logp_ztN, adjoint=adjoint, p_z0=p_z0, device=device)
+        return loss
+    if itr == itr_threshold:
+        with torch.no_grad():
+            # init ETTs
+            ztN = x
+            zt_, _ = odeint(func=nn_cnf_model, y0=(x, logp_ztN), t=torch.tensor([tN, tN - h]))
+            ztN_minus_h = zt_[-1]
+            yy = (ztN - ztN_minus_h) / h
+            xx = ztN
+            #xx_adj = domain_adjust(x=xx, domain_stripe=domain_stripe)
+            #norm_before = get_avg_norm_ETTs(ETTs=ETT_fits)
+            run_tt_als(x=xx, t=tN, y=yy, ETT_fits=ETT_fits, test_ratio=0.2, tol=1e-6, domain_stripe=domain_stripe)
+            #norm_after = get_avg_norm_ETTs(ETTs=ETT_fits)
+        #print('---')
+    # 1) Init. opt the weights
+
+    optimizer.zero_grad()
+    # 2) Forward /odeint
+
     # the extra tt-rk-step
     ztN = x
-
+    assert not ztN.requires_grad, "z(tN) require grad must be False"
     tt_rk_step_result = tt_rk_step(t=tN, h=h, z=ztN, log_p_z=logp_ztN, ETT_fits=ETT_fits, direction='backward',
                                    domain_stripe=domain_stripe)
     ztN_minus_h = tt_rk_step_result['z_prime']
@@ -298,16 +399,40 @@ def hybrid_cnf_optimize_step(optimizer: Optimizer, nn_cnf_model: torch.nn.Module
         method='dopri5',
     )
     z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
+    log_p_z0_raw = p_z0.log_prob(z_t0)
     logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
     loss = -logp_x.mean(0)
     # 3) Backward (adjoint if odeint is attached to ode_adjoint)
     loss.backward()
     # 4) Update parameters
     optimizer.step()
+    with torch.no_grad():
+        # optimize TT
+        zt_prime, _ = odeint(
+            nn_cnf_model,
+            (z_t0, log_p_z0_raw.to(device)),
+            torch.tensor([t0, tN_minus_h]).type(torch.float32).to(device),
+            atol=1e-5,
+            rtol=1e-5,
+            method='dopri5',
+        )
+
+        z_tN_minus_h_prime = zt_prime[-1]
+        rmse_ = MSELoss()(ztN_minus_h, z_tN_minus_h_prime)  # FIXME , for debug , to remove
+        yy = (ztN - z_tN_minus_h_prime) / h
+        xx = ztN
+        # assert is_domain_adjusted(x=xx, domain_stripe=domain_stripe)
+        tol = 1e-6
+        norm_ETTs_before = get_avg_norm_ETTs(ETT_fits)
+        tt_als_results = run_tt_als(x=xx, t=tN, y=yy, ETT_fits=ETT_fits, test_ratio=0.2,
+                                    tol=tol, domain_stripe=domain_stripe)
+        norm_ETTs_after = get_avg_norm_ETTs(ETT_fits)
+        diff_ = norm_ETTs_before - norm_ETTs_after
+
     return loss
 
 
-def get_ETT_fits(D_in: int, D_out: int, rank: int, domain_stripe: List[float], poly_degree: int, device: torch.device):
+def get_ETTs(D_in: int, D_out: int, rank: int, domain_stripe: List[float], poly_degree: int, device: torch.device):
     """
 
     :param D_in:
@@ -325,6 +450,20 @@ def get_ETT_fits(D_in: int, D_out: int, rank: int, domain_stripe: List[float], p
     op = orthpoly(degrees, domain, device)
     ETT_fits = [Extended_TensorTrain(op, ranks, device) for _ in range(D_out)]
     return ETT_fits
+
+
+def get_avg_norm_ETTs(ETTs: List[Extended_TensorTrain], aggregation: str = "sum") -> float:
+    norms = []
+    for i, ETT in enumerate(ETTs):
+        norm = TensorTrain.frob_norm(ETT.tt.comps).item()
+        norms.append(norm)
+    if aggregation == "sum":
+        return sum(norms)
+    elif aggregation == "avg":
+        return np.mean(norms)
+    else:
+        raise ValueError(f"Unknown aggregation : {aggregation}")
+
 
 """
 Some experimental notes for the function lnode.utils.hybrid_cnf_optimize_step 

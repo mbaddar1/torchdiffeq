@@ -316,7 +316,7 @@ def vanilla_cnf_optimize_step(optimizer: Optimizer, nn_cnf_model: torch.nn.Modul
         method='dopri5',
     )
     z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
-    logp_x = p_z0.log_prob(z_t0).to(device) - logp_diff_t0.view(-1)
+    logp_x = p_z0.log_prob(z_t0).to(device)  # - logp_diff_t0.view(-1)
     loss = -logp_x.mean(0)
     # 3) Backward (adjoint if odeint is attached to ode_adjoint)
     loss.backward()

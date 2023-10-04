@@ -10,6 +10,8 @@ from matplotlib import pyplot as plt
 parser = argparse.ArgumentParser()
 parser.add_argument('--input-file', type=str, required=True, help='pkl lnode artifacts file')
 parser.add_argument('--dir', type=str, required=False, help='graphs dir', default='graphs')
+parser.add_argument('--niter', type=int, required=False, default=-1, help='niter to plot from loss curve, '
+                                                                          'default = -1 meaning all iters are to be used')
 args = parser.parse_args()
 
 # logger
@@ -25,8 +27,15 @@ if __name__ == '__main__':
     plt.ylabel('Loss')
     plt.title(f"{artifact['trajectory-opt']} CNF Loss Curve - Gaussian {artifact['dim']}d")
     loss_curve = artifact['loss_curve']
-    niter = len(loss_curve)
-    plt.plot(np.arange(1, niter + 1), loss_curve)
+    N = len(loss_curve)
+    if args.niter > 0:
+        N = min(args.niter, N)
+    loss_curve = loss_curve[:N]
+    # This is the avg loss curve ( i.e. average of last raw losses)
+    # FIXME modify the names to be more meaningful
+    plt.plot(np.arange(1, N + 1), loss_curve)
+    plt.yticks(list(np.arange(0, 3, 0.1)))
+    plt.grid()
     graph_out_file = os.path.join(args.dir, f'loss_curve_{file_name_without_ext}.png')
     plt.savefig(graph_out_file)
     logger.info(f'Written loss curve graph to {graph_out_file}')

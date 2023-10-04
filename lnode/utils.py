@@ -5,10 +5,11 @@ import numpy as np
 import torch
 from torch.nn import MSELoss
 from torch.optim import Optimizer
-
+import pingouin as pg
 from GMSOC.tt_fabrique import TensorTrain
 from examples.models import CNF
 from GMSOC.functional_tt_fabrique import Extended_TensorTrain, orthpoly
+from metrics import wasserstein_distance_two_gaussians
 
 # Global variables
 
@@ -108,7 +109,7 @@ def run_tt_als(x: torch.Tensor, t: float, y: torch.Tensor, ETT_fits: List[Extend
         y_d = y[:, j].view(-1, 1)
         # ALS parameters
         reg_coeff = 1e-2
-        iterations = 40
+        iterations = 4
         rule = None
         # rule = tt.Dörfler_Adaptivity(delta = 1e-6,  maxranks = [32]*(n-1), dims = [feature_dim]*n, rankincr = 1)
         ETT_fits[j].fit(x=x_aug_domain_adjusted.type(torch.float64)[:N_train, :],
@@ -328,7 +329,7 @@ def hybrid_cnf_optimize_step(optimizer: Optimizer, nn_cnf_model: torch.nn.Module
                              tN: float, ETT_fits: List[Extended_TensorTrain],
                              logp_ztN: torch.Tensor, adjoint: bool,
                              p_z0: torch.distributions.Distribution, device: torch.device, h: float,
-                             domain_stripe: List[float], itr: int) -> torch.Tensor:
+                             domain_stripe: List[float], itr: int, itr_threshold: int) -> torch.Tensor:
     """
 
     :param itr:
@@ -353,7 +354,6 @@ def hybrid_cnf_optimize_step(optimizer: Optimizer, nn_cnf_model: torch.nn.Module
     else:
         from torchdiffeq import odeint
     # --- Start of function code ---
-    itr_threshold = 50
     if itr < itr_threshold:
         loss = vanilla_cnf_optimize_step(optimizer=optimizer, nn_cnf_model=nn_cnf_model, x=x, t0=t0, tN=tN,
                                          logp_diff_tN=logp_ztN, adjoint=adjoint, p_z0=p_z0, device=device)
@@ -366,11 +366,11 @@ def hybrid_cnf_optimize_step(optimizer: Optimizer, nn_cnf_model: torch.nn.Module
             ztN_minus_h = zt_[-1]
             yy = (ztN - ztN_minus_h) / h
             xx = ztN
-            #xx_adj = domain_adjust(x=xx, domain_stripe=domain_stripe)
-            #norm_before = get_avg_norm_ETTs(ETTs=ETT_fits)
+            # xx_adj = domain_adjust(x=xx, domain_stripe=domain_stripe)
+            # norm_before = get_avg_norm_ETTs(ETTs=ETT_fits)
             run_tt_als(x=xx, t=tN, y=yy, ETT_fits=ETT_fits, test_ratio=0.2, tol=1e-6, domain_stripe=domain_stripe)
-            #norm_after = get_avg_norm_ETTs(ETTs=ETT_fits)
-        #print('---')
+            # norm_after = get_avg_norm_ETTs(ETTs=ETT_fits)
+        # print('---')
     # 1) Init. opt the weights
 
     optimizer.zero_grad()
@@ -450,6 +450,106 @@ def get_ETTs(D_in: int, D_out: int, rank: int, domain_stripe: List[float], poly_
     op = orthpoly(degrees, domain, device)
     ETT_fits = [Extended_TensorTrain(op, ranks, device) for _ in range(D_out)]
     return ETT_fits
+
+
+def validate_vanilla_cnf_trained_models(nn_cnf_model: torch.nn.Module,
+                                        base_distribution: torch.distributions.Distribution,
+                                        target_distribution: torch.distributions.Distribution,
+                                        t0: float, tN: float,
+                                        num_samples: int,
+                                        adjoint: bool) -> dict:
+    # FIXME, is that the best way to do this ?
+    if adjoint:
+        from torchdiffeq import odeint_adjoint as odeint
+    else:
+        from torchdiffeq import odeint
+    # --- Start of function code ---
+    z0_sample = base_distribution.sample(torch.Size([num_samples]))
+    log_p_z0 = base_distribution.log_prob(z0_sample).view(-1, 1)
+
+    zt, logpzt = odeint(func=nn_cnf_model, t=torch.tensor([t0, tN]), y0=(z0_sample, log_p_z0))
+    ztN = zt[-1]
+    normality_test = pg.multivariate_normality(X=ztN.detach().cpu().numpy())
+    sample_mean = torch.mean(input=ztN, dim=0)
+    sample_cov = torch.cov(input=ztN.T)
+    mean_rmse = MSELoss()(sample_mean, target_distribution.mean).item()
+    cov_rmse = MSELoss()(torch.diagonal(sample_cov), target_distribution.variance).item()
+
+    if normality_test.normal:
+        hz_loss = (1 - normality_test.pval) * (1 - mean_rmse) * (1 - cov_rmse)
+    else:
+        hz_loss = np.Inf
+    assert isinstance(hz_loss, float)
+    validation_results = {'hz_loss': hz_loss}
+    # wd distance
+    dist_mean = target_distribution.mean
+    dist_cov = torch.diag(target_distribution.variance)
+    wd = wasserstein_distance_two_gaussians(m1=dist_mean, m2=sample_mean, C1=dist_cov,
+                                            C2=torch.round(sample_cov, decimals=1))
+    validation_results['wd'] = wd
+    return validation_results
+
+
+def validate_hybrid_trained_models(nn_cnf_model: torch.nn.Module, ETT_fits: List[Extended_TensorTrain],
+                                   base_distribution: torch.distributions.Distribution,
+                                   target_distribution: torch.distributions.Distribution, t0: float, tN: float,
+                                   num_samples: int, adjoint: bool, h: float, domain_stripe: List[float], itr: int,
+                                   itr_threshold: int) -> dict:
+    """
+
+    :param nn_cnf_model:
+    :param ETT_fits:
+    :param base_distribution:
+    :param target_distribution:
+    :param t0:
+    :param tN:
+    :param num_samples:
+    :param adjoint:
+    :param h:
+    :param domain_stripe:
+    :param itr:
+    :param itr_threshold:
+    :return:
+    """
+    # FIXME, is that the best way to do this ?
+    if adjoint:
+        from torchdiffeq import odeint_adjoint as odeint
+    else:
+        from torchdiffeq import odeint
+
+    # --- Start of function code ---
+    z0_sample = base_distribution.sample(torch.Size([num_samples]))
+    log_p_z0 = base_distribution.log_prob(z0_sample).view(-1, 1)
+
+    if itr < itr_threshold:
+        zt, _ = odeint(func=nn_cnf_model, y0=(z0_sample, log_p_z0), t=torch.tensor([t0, tN]), )
+        ztN = zt[-1]
+    else:
+        zt, logpzt = odeint(func=nn_cnf_model, t=torch.tensor([t0, tN - h]), y0=(z0_sample, log_p_z0))
+        ztN_minus_h = zt[-1]
+        logpztN_minus_h = logpzt[-1]
+        # FIXME, modify the h and domain stripe params to be coming from outer scope calls
+
+        results = tt_rk_step(t=t0, z=ztN_minus_h, log_p_z=logpztN_minus_h, h=h, ETT_fits=ETT_fits, direction="forward",
+                             domain_stripe=domain_stripe)
+        ztN = results['z_prime']
+        # logpztN_minus_h = results['log_p_z_prime']
+
+    normality_test = pg.multivariate_normality(X=ztN.detach().cpu().numpy())
+    m = torch.mean(input=ztN, dim=0)
+    cov_ = torch.cov(input=ztN.T)
+    mean_rmse = MSELoss()(m, target_distribution.mean).item()
+    cov_rmse = MSELoss()(torch.diagonal(cov_), target_distribution.variance).item()
+    if normality_test.normal:
+        hz_loss = (1 - normality_test.pval) * (1 - mean_rmse) * (1 - cov_rmse)
+    else:
+        hz_loss = np.Inf
+    assert isinstance(hz_loss, float)
+    validation_results = {'hz_loss': hz_loss}
+    wd = wasserstein_distance_two_gaussians(m1=target_distribution.mean, m2=m,
+                                            C1=torch.diag(target_distribution.variance), C2=cov_)
+    validation_results['wd'] = wd
+    return validation_results
 
 
 def get_avg_norm_ETTs(ETTs: List[Extended_TensorTrain], aggregation: str = "sum") -> float:

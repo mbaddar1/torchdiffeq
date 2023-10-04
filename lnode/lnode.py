@@ -8,7 +8,6 @@ Examples for running via command line
 
 1) Train a Vanilla-CNF
 export PYTHONPATH=$PYTHONPATH:.
-python3 lnode/lnode.py --niters 1000 --distribution gauss6d --t0 0 --t1 10 --trajectory-opt vanilla
 
 2)Train a LNODE model [TBD]
 
@@ -21,8 +20,9 @@ import os
 import argparse
 import glob
 import pickle
+import time
 from datetime import datetime
-from typing import Union, Any
+from typing import Union, Any, List
 
 from PIL import Image
 import numpy as np
@@ -30,7 +30,8 @@ import matplotlib
 from torch import Tensor
 
 from examples.models import CNF
-from utils import domain_adjust, is_domain_adjusted, vanilla_cnf_optimize_step, get_ETTs, hybrid_cnf_optimize_step
+from utils import domain_adjust, is_domain_adjusted, vanilla_cnf_optimize_step, get_ETTs, hybrid_cnf_optimize_step, \
+    validate_hybrid_trained_models, validate_vanilla_cnf_trained_models
 
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
@@ -48,6 +49,7 @@ random.seed(SEED)
 
 # Global Variables
 DIM_DIST_MAP = {'circles': 2, 'gauss3d': 3, 'gauss4d': 4, 'gauss6d': 6, 'gauss10d': 10}
+TOL = 1e-4
 # get logger
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
@@ -57,9 +59,9 @@ parser.add_argument('--t0', type=float, required=True)
 parser.add_argument('--t1', type=float, required=True)
 parser.add_argument('--adjoint', action='store_true')
 parser.add_argument('--viz', action='store_true')
-parser.add_argument('--niters', type=int, required=True)
+parser.add_argument('--max_iters', type=int, required=True)
 parser.add_argument('--lr', type=float, default=1e-3)
-parser.add_argument('--num_samples', type=int, default=512)
+parser.add_argument('--num_samples', type=int, default=1024)
 parser.add_argument('--width', type=int, default=64)
 parser.add_argument('--hidden_dim', type=int, default=32)
 parser.add_argument('--gpu', type=int, default=0)
@@ -68,18 +70,24 @@ parser.add_argument('--results_dir', type=str, default="./results")
 # LNODE
 parser.add_argument('--distribution', type=str, choices=['circles', 'gauss3d', 'gauss4d', 'gauss6d', 'gauss10d'])
 parser.add_argument('--trajectory-opt', type=str, choices=['vanilla', 'hybrid'])
+parser.add_argument('--itr-threshold', type=int, help='iteration switch threshold')
+
 # parser.add_argument('--domain-adjust', default=True, action='store_true',
 #                     help='Adjust domain of target random variable to a predefined range for Legendre polynomial and '
 #                          'similar basis functions when using TT-ALS in Hybrid trajectory generation')
 # pass a list as cmd args
 # https://stackoverflow.com/a/32763023/5937273
-parser.add_argument('--domain', nargs='*', type=float, default=[-1, 1], help='domain to adjust target R.V to')
-
+parser.add_argument('--domain_stripe', nargs='*', type=float, default=[-1, 1],
+                    help='domain to adjust target R.V to')
+parser.add_argument('--h', type=float, help='h for the TT-RK step')
+# parser.add_argument('--tol', type=float, help='tolerance')
 args = parser.parse_args()
 # assertion for args
-
-assert isinstance(args.domain, list) and len(args.domain) == 2 and args.domain[0] < args.domain[1], \
-    f"domain must be of type list, len(list) = 2 and domain[0] < domain[1] , however we got domain = {args.domain}"
+if args.trajectory_opt == 'hybrid' and (args.itr_threshold is None or args.itr_threshold < 1):
+    raise ValueError(f'if arg.trajectory_opt == hybrid then args.itr_threshold must be an integer >= 1')
+domain_stripe = args.domain_stripe
+assert isinstance(domain_stripe, list) and len(domain_stripe) == 2 and domain_stripe[0] < domain_stripe[1], \
+    f"domain must be of type list, len(list) = 2 and domain[0] < domain[1] , however we got domain = {domain_stripe}"
 if args.adjoint:
     from torchdiffeq import odeint_adjoint as odeint
 else:
@@ -162,11 +170,12 @@ if __name__ == '__main__':
     in_out_dim = DIM_DIST_MAP[args.distribution]
     base_distribution = MultivariateNormal(loc=torch.zeros(in_out_dim).to(device),
                                            covariance_matrix=0.1 * torch.eye(in_out_dim).to(device))
+    target_distribution = get_distribution(args.distribution)
     time_stamp = datetime.now().isoformat()
     # -------
     # Model
     nn_cnf_func = CNF(in_out_dim=in_out_dim, hidden_dim=args.hidden_dim, width=args.width, device=device)
-    ETT_fits = get_ETTs(D_in=in_out_dim + 1, D_out=in_out_dim, rank=4, domain_stripe=[-1, 1], poly_degree=4,
+    ETT_fits = get_ETTs(D_in=in_out_dim + 1, D_out=in_out_dim, rank=6, domain_stripe=[-1, 1], poly_degree=6,
                         device=device)
     # optimizer
     optimizer = optim.Adam(nn_cnf_func.parameters(), lr=args.lr)
@@ -187,22 +196,13 @@ if __name__ == '__main__':
             print('Loaded ckpt from {}'.format(ckpt_path))
 
     try:
-        for itr in range(1, args.niters + 1):
+        itr_var = 0
+        start_time = time.time()
+        for itr in range(1, args.max_iters + 1):
+            itr_var = itr
             optimizer.zero_grad()
-
             x, logp_diff_t1 = get_batch(num_samples=args.num_samples, distribution_name=args.distribution)
-            # if args.domain_adjust:
-            #     logger.info(f'Adjusting domain for target R.V to domain = {args.domain}')
-            #     x = domain_adjust(x=x, domain_stripe=[-1, 1])
-            #     x_np = x.detach().cpu().numpy()
-            #     assert is_domain_adjusted(x=x, domain_stripe=args.domain)  # FIXME, extra assertion,may need to remove
-            #     normality_test = pg.multivariate_normality(X=x_np)
-            #     if normality_test.normal:
-            #         logger.info("Target R.V. pass HZ normality test after domain adjustment")
-            #     else:
-            #         err_msg = "Target R.V. failed HZ normality test after domain adjustment"
-            #         logger.error(err_msg)
-            #         raise ValueError(err_msg)
+
             if args.trajectory_opt == "vanilla":
                 loss = vanilla_cnf_optimize_step(optimizer=optimizer, nn_cnf_model=nn_cnf_func, x=x, t0=args.t0,
                                                  tN=args.t1, logp_diff_tN=logp_diff_t1, adjoint=args.adjoint,
@@ -211,37 +211,83 @@ if __name__ == '__main__':
                 loss = hybrid_cnf_optimize_step(optimizer=optimizer, nn_cnf_model=nn_cnf_func, ETT_fits=ETT_fits, x=x,
                                                 t0=args.t0,
                                                 tN=args.t1, logp_ztN=logp_diff_t1, adjoint=args.adjoint, p_z0=p_z0,
-                                                device=device, h=1, domain_stripe=[-1, 1], itr=itr)
+                                                device=device, h=args.h, domain_stripe=[-1, 1], itr=itr,
+                                                itr_threshold=args.itr_threshold)
             else:
                 raise ValueError(f"Unknown trajectory optimization method = {args.trajectory_opt}")
+            # calculate wd and hz losses
+
             loss_raw_curve.append(loss.item())
             if itr > 10:
                 my_avg = np.nanmean(loss_raw_curve[-10:])
             else:
                 my_avg = np.nanmean(loss_raw_curve)
             loss_running_avg_curve.append(my_avg)
-            if my_avg < 0.05:
-                break
+            # if my_avg < 1e-5:
+            #     break
+            validation_results = None
+            if args.trajectory_opt == 'vanilla':
+                validation_results = validate_vanilla_cnf_trained_models(nn_cnf_model=nn_cnf_func,
+                                                                         base_distribution=base_distribution,
+                                                                         target_distribution=target_distribution,
+                                                                         t0=args.t0,
+                                                                         tN=args.t1,
+                                                                         num_samples=args.num_samples,
+                                                                         adjoint=args.adjoint)
+            elif args.trajectory_opt == 'hybrid':
+                validation_results = validate_hybrid_trained_models(nn_cnf_model=nn_cnf_func, ETT_fits=ETT_fits,
+                                                                    base_distribution=base_distribution,
+                                                                    target_distribution=target_distribution, t0=args.t0,
+                                                                    tN=args.t1,
+                                                                    num_samples=args.num_samples, adjoint=args.adjoint,
+                                                                    h=args.h,
+                                                                    domain_stripe=args.domain_stripe, itr=itr,
+                                                                    itr_threshold=args.itr_threshold)
             # loss_meter.update(my_avg)
 
             print('Iter: {}, running avg loss: {:.4f}, raw loss = {:.4f}'.format(itr, my_avg, loss.item()))
+            print(f'Iter {itr} , validation results = {validation_results}')
+        end_time = time.time()
+        logger.info(f'Running time in seconds = {(end_time - start_time)}')
         logger.info('Finished training, dumping experiment results')
-        results = dict()
-        results['trajectory-opt'] = args.trajectory_opt
-        results['base_distribution'] = base_distribution
-        target_distribution = get_distribution(args.distribution)
-        results['dim'] = in_out_dim
-        results['target_distribution'] = target_distribution
-        results['niters'] = args.niters
-        results['loss'] = loss_meter.avg
-        results['args'] = vars(args)
-        results['model'] = nn_cnf_func.state_dict()
-        results['loss_curve'] = loss_running_avg_curve
-        results['loss_curve_raw'] = loss_raw_curve
+        # validate trained models
+        validation_results = None
+        # if args.trajectory_opt == 'vanilla':
+        #     validation_results = validate_vanilla_cnf_trained_models(nn_cnf_model=nn_cnf_func,
+        #                                                              base_distribution=base_distribution,
+        #                                                              target_distribution=target_distribution,
+        #                                                              t0=args.t0,
+        #                                                              tN=args.t1,
+        #                                                              num_samples=args.num_samples, adjoint=args.adjoint)
+        # elif args.trajectory_opt == 'hybrid':
+        #     validation_results = validate_hybrid_trained_models(nn_cnf_model=nn_cnf_func, ETT_fits=ETT_fits,
+        #                                                         base_distribution=base_distribution,
+        #                                                         target_distribution=target_distribution, t0=args.t0,
+        #                                                         tN=args.t1,
+        #                                                         num_samples=args.num_samples, adjoint=args.adjoint,
+        #                                                         h=args.h,
+        #                                                         domain_stripe=args.domain_stripe)
+        logger.info(f'Validation results for train model using the {args.trajectory_opt} method = {validation_results}')
+        train_artifacts = dict()
+        train_artifacts['trajectory-opt'] = args.trajectory_opt
+        train_artifacts['base_distribution'] = base_distribution
+
+        train_artifacts['dim'] = in_out_dim
+        train_artifacts['target_distribution'] = target_distribution
+        train_artifacts['max_iters'] = args.max_iters
+        train_artifacts['niters'] = itr_var
+        train_artifacts['loss'] = loss_meter.avg
+        train_artifacts['runtime_in_seconds'] = end_time - start_time
+        train_artifacts['args'] = vars(args)
+        train_artifacts['model'] = nn_cnf_func.state_dict()
+        train_artifacts['loss_curve'] = loss_running_avg_curve
+        train_artifacts['loss_curve_raw'] = loss_raw_curve
         # results['domain_adjusted'] = args.domain_adjust
         # results['domain'] = args.domain
-        artifact_version_name = f'{time_stamp}_dist_{target_distribution.__class__.__name__}_d_{in_out_dim}_niters_{args.niters}'
-        pickle.dump(obj=results, file=open(f'artifacts/{args.trajectory_opt}_{artifact_version_name}.pkl', "wb"))
+        artifact_version_name = (f'{time_stamp}_dist_{target_distribution.__class__.__name__}_d_'
+                                 f'{in_out_dim}_niters_{itr_var}_maxiters_{args.max_iters}')
+        pickle.dump(obj=train_artifacts,
+                    file=open(f'artifacts/{args.trajectory_opt}_{artifact_version_name}.pkl', "wb"))
 
     except KeyboardInterrupt:
         if args.train_dir is not None:
@@ -344,3 +390,28 @@ if __name__ == '__main__':
         what happened ?
         
         """
+
+"""
+Parameter tracking
+
+for Hybrid
+--max_iters
+200
+--distribution
+gauss4d
+--t0
+0
+--t1
+10
+--trajectory-opt
+hybrid
+--h
+2
+--itr-threshold
+100
+{'hz_loss': 0.05944538011095711, 'wd': 0.008283842113765308}
+-----
+--max_iters 200 --distribution gauss4d --t0 0 --t1 10 --trajectory-opt vanilla --h 2 --itr-threshold 100
+{'hz_loss': 0.8336306754438337, 'wd': 0.0017414402655022247}
+HZResults(hz=0.9767139641313509, pval=0.16631441140867886, normal=True)
+"""

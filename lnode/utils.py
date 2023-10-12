@@ -316,7 +316,7 @@ def vanilla_cnf_optimize_step(optimizer: Optimizer, nn_cnf_model: torch.nn.Modul
         method='dopri5',
     )
     z_t0, logp_diff_t0 = z_t[-1], logp_diff_t[-1]
-    logp_x = p_z0.log_prob(z_t0).to(device)  # - logp_diff_t0.view(-1)
+    logp_x = p_z0.log_prob(z_t0).to(device) #- logp_diff_t0.view(-1)
     loss = -logp_x.mean(0)
     # 3) Backward (adjoint if odeint is attached to ode_adjoint)
     loss.backward()
@@ -486,7 +486,11 @@ def validate_vanilla_cnf_trained_models(nn_cnf_model: torch.nn.Module,
     dist_cov = torch.diag(target_distribution.variance)
     wd = wasserstein_distance_two_gaussians(m1=dist_mean, m2=sample_mean, C1=dist_cov,
                                             C2=torch.round(sample_cov, decimals=1))
+    mean_rmse = MSELoss()(dist_mean, sample_mean).item()
+    cov_rmse = MSELoss()(dist_cov, sample_cov).item()
     validation_results['wd'] = wd
+    validation_results['mean_rmse'] = mean_rmse
+    validation_results['cov_rmse'] = cov_rmse
     return validation_results
 
 
@@ -549,6 +553,8 @@ def validate_hybrid_trained_models(nn_cnf_model: torch.nn.Module, ETT_fits: List
     wd = wasserstein_distance_two_gaussians(m1=target_distribution.mean, m2=m,
                                             C1=torch.diag(target_distribution.variance), C2=cov_)
     validation_results['wd'] = wd
+    validation_results['mean_rmse'] = mean_rmse
+    validation_results['cov_rmse'] = cov_rmse
     return validation_results
 
 

@@ -130,7 +130,7 @@ if __name__ == '__main__':
         X_target = torch.distributions.MultivariateNormal(loc=mio, covariance_matrix=Sigma).sample(torch.Size([N]))
         X_target2 = torch.einsum('ij,bj->bi', A, X_base) + mio
         min_ = minimize(fun=geometric_mean_obj_fn_ND, x0=q0, args=(u, X_target2),
-                        method=opt_method)  # CG proved to be good
+                        method=opt_method)
         q_target_gq = min_.x
         q_target_expected = torch.matmul(A, torch.tensor(q_base).type(torch.float32)) + mio
         mse_loss = MSELoss()(q_target_expected, torch.tensor(q_target_gq))

@@ -17,4 +17,8 @@ https://arxiv.org/abs/2205.14977
 https://pypi.org/project/vqr/
 https://github.com/vistalab-technion/vqr
 
+Why this approach?
+You say Normalizing Flows I see Bayesian Networks
+https://arxiv.org/abs/2006.00866
+
 """

@@ -1,0 +1,5 @@
+"""
+MONGE-KANTOROVICH DEPTH,
+QUANTILES, RANKS, AND SIGNS
+https://arxiv.org/pdf/1412.8434.pdf
+"""

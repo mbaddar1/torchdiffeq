@@ -17,6 +17,11 @@ http://compneurosci.com/wiki/images/4/42/Intro_to_PCA_and_ICA.pdf
 
 Independent Component Analysis A Tutorial
 https://www.cs.jhu.edu/~ayuille/courses/Stat161-261-Spring14/HyvO00-icatut.pdf
+
+Comparing patterns of component loadings: Principal
+Component Analysis (PCA) versus Independent Component
+Analysis (ICA) in analyzing multivariate non-normal data
+https://link.springer.com/article/10.3758/s13428-012-0193-1
 """
 if __name__ == '__main__':
     pass

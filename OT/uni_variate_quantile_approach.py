@@ -10,6 +10,7 @@ import numpy as np
 from sklearn.decomposition import PCA, FastICA
 import pingouin as pg
 from statsmodels.distributions.empirical_distribution import ECDF
+import matplotlib.pyplot as plt
 
 """
 Flexible Generic Distributions 
@@ -83,15 +84,29 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         Y_test_ICA = torch.tensor(transformer.fit_transform(Y_test.detach().numpy()))
         Yq_ICA_test_ref = torch.quantile(input=Y_test_ICA, dim=0, q=q)
         Yq_pred = model(Xq_test)
+
         mse = MSELoss()(Yq_ICA_test_ref, Yq_pred).item()
         mses_qq.append(mse)
         # cdf validation
+        for j in range(D):
+            plt.plot(q.detach().numpy(),Yq_ICA_test_ref[:,j].detach().numpy())
+            plt.plot(q.detach().numpy(),Yq_pred[:,j].detach().numpy())
+            plt.savefig(f'cdf_d_{j}.png')
+            plt.clf()
+            plt.plot(Yq_ICA_test_ref[:, j].detach().numpy(), Yq_ICA_test_ref[:, j].detach().numpy())
+            plt.plot(Yq_ICA_test_ref[:,j].detach().numpy(),Yq_pred[:,j].detach().numpy())
+            plt.savefig(f'qq_d_{j}.png')
+            plt.clf()
         mse_cdf_repeat = []
         for j in range(D):
             y_ica_j = Yq_ICA_test_ref[:, j].detach().numpy()
             ecdf = ECDF(x=y_ica_j)
             cdf_ref = ecdf(Yq_ICA_test_ref[:, j].detach().numpy())
             cdf_est = ecdf(Yq_pred[:, j].detach().numpy())
+            # plt.plot(q.detach().numpy(),cdf_ref)
+            # plt.plot(q.detach().numpy(), cdf_est)
+            # plt.savefig('cdf.png')
+            plt.clf()
             mse_cdf_j = MSELoss()(torch.tensor(cdf_ref), torch.tensor(cdf_est))
             mse_cdf_repeat.append(mse_cdf_j)
         mse_cdfs.append(torch.tensor(mse_cdf_repeat))
@@ -105,8 +120,8 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
 if __name__ == '__main__':
     D = 4
     N = 10000
-    batch_size = 8
-    niter = 2000
+    batch_size = 1024
+    niter = 300
     q_step = 1e-4
     q = torch.tensor(list(np.arange(0, 1 + q_step, q_step)), dtype=torch.float32)
     base_dist = torch.distributions.MultivariateNormal(loc=torch.zeros(D), covariance_matrix=torch.diag(
@@ -156,7 +171,7 @@ if __name__ == '__main__':
     #
     print(f'Start Training')
     learning_rate = 0.1
-    model = Reg(in_out_dim=D, hidden_dim=50, type='nonlinear')
+    model = Reg(in_out_dim=D, hidden_dim=100, type='nonlinear')
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     for i in range(niter):
         # indices = torch.randperm(n=batch_size)

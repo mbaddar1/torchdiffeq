@@ -72,9 +72,11 @@ def multivariate_inv_sample(Yq: torch.Tensor, N_samples: int):
 def validate_qq_model(base_dist: torch.distributions.Distribution,
                       target_distribution: torch.distributions.Distribution, model: torch.nn.Module, N: int,
                       q: torch.Tensor, transformer: FastICA, repeats: int) -> dict:
-    mses = []
+    mses_qq = []
+    mse_cdfs = []
     for i in range(repeats):
         print(f'validation iteration {i + 1} out of {repeats}')
+        # q-q validation
         X_test = base_dist.sample(torch.Size([N]))
         Xq_test = torch.quantile(input=X_test, q=q, dim=0)
         Y_test = target_distribution.sample(torch.Size([N]))
@@ -82,9 +84,21 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         Yq_ICA_test_ref = torch.quantile(input=Y_test_ICA, dim=0, q=q)
         Yq_pred = model(Xq_test)
         mse = MSELoss()(Yq_ICA_test_ref, Yq_pred).item()
-        mses.append(mse)
+        mses_qq.append(mse)
+        # cdf validation
+        mse_cdf_repeat = []
+        for j in range(D):
+            y_ica_j = Yq_ICA_test_ref[:, j].detach().numpy()
+            ecdf = ECDF(x=y_ica_j)
+            cdf_ref = ecdf(Yq_ICA_test_ref[:, j].detach().numpy())
+            cdf_est = ecdf(Yq_pred[:, j].detach().numpy())
+            mse_cdf_j = MSELoss()(torch.tensor(cdf_ref), torch.tensor(cdf_est))
+            mse_cdf_repeat.append(mse_cdf_j)
+        mse_cdfs.append(torch.tensor(mse_cdf_repeat))
+
     res = dict()
-    res['ica_qq_mses'] = mses
+    res['ica_qq_mses'] = mses_qq
+    res['cdf_mses'] = mse_cdfs
     return res
 
 
@@ -101,6 +115,7 @@ if __name__ == '__main__':
     A = torch.distributions.Uniform(0.1, 0.9).sample(torch.Size([D, D]))
     target_dist_cov = torch.matmul(A, A.T)
     target_dist = torch.distributions.MultivariateNormal(loc=target_dist_mean, covariance_matrix=target_dist_cov)
+    print(f'target dist = {target_dist}, mean = {target_dist.mean}, cov = {target_dist.covariance_matrix}')
     # Original Samples
     X = base_dist.sample(torch.Size([N]))
     Y = target_dist.sample(torch.Size([N]))
@@ -141,10 +156,10 @@ if __name__ == '__main__':
     #
     print(f'Start Training')
     learning_rate = 0.1
-    model = Reg(in_out_dim=D, hidden_dim=50, type='linear')
+    model = Reg(in_out_dim=D, hidden_dim=50, type='nonlinear')
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     for i in range(niter):
-        #indices = torch.randperm(n=batch_size)
+        # indices = torch.randperm(n=batch_size)
         X_batch = base_dist.sample(torch.Size([batch_size]))
         Y_batch = target_dist.sample(torch.Size([batch_size]))
         Y_batch_ica = torch.tensor(transformer.fit_transform(Y_batch.detach().numpy()))

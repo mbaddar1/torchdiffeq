@@ -27,8 +27,8 @@ class Reg(torch.nn.Module):
         elif type == 'nonlinear':
             self.model = torch.nn.Sequential(torch.nn.Linear(in_out_dim, hidden_dim),
                                              torch.nn.ReLU(),
-                                             torch.nn.Linear(hidden_dim, hidden_dim),
-                                             torch.nn.ReLU(),
+                                             # torch.nn.Linear(hidden_dim, hidden_dim),
+                                             # torch.nn.ReLU(),
                                              torch.nn.Linear(hidden_dim, in_out_dim)
                                              )
 
@@ -89,12 +89,12 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         mses_qq.append(mse)
         # cdf validation
         for j in range(D):
-            plt.plot(q.detach().numpy(),Yq_ICA_test_ref[:,j].detach().numpy())
-            plt.plot(q.detach().numpy(),Yq_pred[:,j].detach().numpy())
+            plt.plot(q.detach().numpy(), Yq_ICA_test_ref[:, j].detach().numpy())
+            plt.plot(q.detach().numpy(), Yq_pred[:, j].detach().numpy())
             plt.savefig(f'cdf_d_{j}.png')
             plt.clf()
             plt.plot(Yq_ICA_test_ref[:, j].detach().numpy(), Yq_ICA_test_ref[:, j].detach().numpy())
-            plt.plot(Yq_ICA_test_ref[:,j].detach().numpy(),Yq_pred[:,j].detach().numpy())
+            plt.plot(Yq_ICA_test_ref[:, j].detach().numpy(), Yq_pred[:, j].detach().numpy())
             plt.savefig(f'qq_d_{j}.png')
             plt.clf()
         mse_cdf_repeat = []
@@ -124,12 +124,15 @@ if __name__ == '__main__':
     niter = 300
     q_step = 1e-4
     q = torch.tensor(list(np.arange(0, 1 + q_step, q_step)), dtype=torch.float32)
-    base_dist = torch.distributions.MultivariateNormal(loc=torch.zeros(D), covariance_matrix=torch.diag(
-        torch.distributions.Uniform(0.1, 0.9).sample(torch.Size([D]))))
+    base_dist = torch.distributions.MultivariateNormal(
+        loc=torch.distributions.Uniform(-0.05, 0.05).sample(torch.Size([D])),
+        covariance_matrix=torch.diag(
+            torch.distributions.Uniform(0.1, 0.9).sample(torch.Size([D]))))
     target_dist_mean = torch.distributions.Uniform(-10, 10).sample(torch.Size([D]))
-    A = torch.distributions.Uniform(0.1, 0.9).sample(torch.Size([D, D]))
+    A = torch.distributions.Uniform(-5.0, 5.0).sample(torch.Size([D, D]))
     target_dist_cov = torch.matmul(A, A.T)
     target_dist = torch.distributions.MultivariateNormal(loc=target_dist_mean, covariance_matrix=target_dist_cov)
+    print(f'base dist  ={base_dist}, mean = {base_dist.mean}, cov = {base_dist.covariance_matrix}')
     print(f'target dist = {target_dist}, mean = {target_dist.mean}, cov = {target_dist.covariance_matrix}')
     # Original Samples
     X = base_dist.sample(torch.Size([N]))
@@ -172,6 +175,7 @@ if __name__ == '__main__':
     print(f'Start Training')
     learning_rate = 0.1
     model = Reg(in_out_dim=D, hidden_dim=100, type='nonlinear')
+    print(f'model = {model}')
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     for i in range(niter):
         # indices = torch.randperm(n=batch_size)

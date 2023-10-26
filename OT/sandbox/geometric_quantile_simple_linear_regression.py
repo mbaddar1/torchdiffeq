@@ -1,12 +1,11 @@
 import numpy as np
-import scipy.stats
 from scipy.optimize import minimize
 from scipy.stats import norm, normaltest
 from scipy.stats._mstats_basic import mquantiles
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_squared_error
 
-from OT.geometric_quantile import geometric_mean_obj_fn_1D
+from OT.sandbox.geometric_quantile import geometric_mean_obj_fn_1D
 
 if __name__ == '__main__':
     for i in range(10):

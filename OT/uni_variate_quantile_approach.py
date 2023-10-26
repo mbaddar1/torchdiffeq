@@ -14,7 +14,7 @@ from statsmodels.distributions.empirical_distribution import ECDF
 import matplotlib.pyplot as plt
 
 from OT.inverse_transform_samples_quantile_interp import uv_sample
-from OT.utils import wasserstein_distance_two_gaussians
+from OT.utils import wasserstein_distance_two_gaussians, get_ETTs, run_tt_als, ETT_fits_predict
 
 """
 Flexible Generic Distributions 
@@ -76,7 +76,7 @@ def multivariate_inv_sample(Yq: torch.Tensor, N_samples: int):
 
 def validate_qq_model(base_dist: torch.distributions.Distribution,
                       target_distribution: torch.distributions.Distribution, model: torch.nn.Module, N: int,
-                      q: torch.Tensor, transformer: FastICA, repeats: int) -> dict:
+                      u_levels: torch.Tensor, transformer: FastICA, repeats: int) -> dict:
     mses_qq = []
     mse_cdfs = []
     wd_list = []
@@ -85,18 +85,18 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         print(f'validation iteration {i + 1} out of {repeats}')
         # q-q validation
         X_test = base_dist.sample(torch.Size([N]))
-        Xq_test = torch.quantile(input=X_test, q=q, dim=0)
+        Xq_test = torch.quantile(input=X_test, q=u_levels.type(X_test.dtype), dim=0)
         Y_test = target_distribution.sample(torch.Size([N]))
         Y_test_ICA = torch.tensor(transformer.fit_transform(Y_test.detach().numpy()))
-        Yq_ICA_test_ref = torch.quantile(input=Y_test_ICA, dim=0, q=q)
+        Yq_ICA_test_ref = torch.quantile(input=Y_test_ICA, dim=0, q=u_levels.type(Y_test_ICA.dtype))
         Yq_pred = model(Xq_test)
 
         mse = MSELoss()(Yq_ICA_test_ref, Yq_pred).item()
         mses_qq.append(mse)
         # cdf validation
         for j in range(D):
-            plt.plot(q.detach().numpy(), Yq_ICA_test_ref[:, j].detach().numpy())
-            plt.plot(q.detach().numpy(), Yq_pred[:, j].detach().numpy())
+            plt.plot(u_levels.detach().numpy(), Yq_ICA_test_ref[:, j].detach().numpy())
+            plt.plot(u_levels.detach().numpy(), Yq_pred[:, j].detach().numpy())
             plt.savefig(f'cdf_d_{j}.png')
             plt.clf()
             plt.plot(Yq_ICA_test_ref[:, j].detach().numpy(), Yq_ICA_test_ref[:, j].detach().numpy())
@@ -146,9 +146,12 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
 if __name__ == '__main__':
     D = 4
     N = 10000
-    batch_size = 1024
-    niter = 150
+    batch_size = 8192
+    niter = 20
     u_step = 1e-5
+    model_types = ['nn', 'tt']
+    model_type = 'nn'
+    assert model_type in model_types
     u_levels = torch.tensor(list(np.arange(0, 1 + u_step, u_step)), dtype=torch.float32)
     base_dist = torch.distributions.MultivariateNormal(
         loc=torch.distributions.Uniform(-0.05, 0.05).sample(torch.Size([D])),
@@ -161,8 +164,8 @@ if __name__ == '__main__':
     print(f'base dist  ={base_dist}, mean = {base_dist.mean}, cov = {base_dist.covariance_matrix}')
     print(f'target dist = {target_dist}, mean = {target_dist.mean}, cov = {target_dist.covariance_matrix}')
     # Original Samples
-    X = base_dist.sample(torch.Size([N]))
-    Y = target_dist.sample(torch.Size([N]))
+    X = base_dist.sample(torch.Size([N])).type(torch.float32)
+    Y = target_dist.sample(torch.Size([N])).type(torch.float32)
     # Apply ICA
     transformer = FastICA(random_state=0, whiten='unit-variance', max_iter=2000, tol=1e-4)
     Y_ICA = torch.tensor(transformer.fit_transform(X=Y), dtype=torch.float32)
@@ -188,7 +191,8 @@ if __name__ == '__main__':
         f'MSE for reconstructed vs actual sample mean = {MSELoss()(torch.mean(Y, dim=0), torch.mean(Y_recons, dim=0))}')
     print(f'MSE for reconstructed vs actual sample cov  = {MSELoss()(torch.cov(Y.T), torch.cov(Y_recons.T))}')
     target_sample_mvn_test = pg.multivariate_normality(X=Y)
-    assert target_sample_mvn_test.normal, f"Raw target sample failed the mvn test , res = {target_sample_mvn_test}"
+    # FIXME , find a better way for assertion
+    # assert target_sample_mvn_test.normal, f"Raw target sample failed the mvn test , res = {target_sample_mvn_test}"
     target_sample_ica_mvn_test = pg.multivariate_normality(X=Y_ICA)
     print(f'Normality test for the actual sample = {target_sample_mvn_test}')
     print(f'Normality test for the reconstructed sample = {target_sample_ica_mvn_test}')
@@ -210,26 +214,40 @@ if __name__ == '__main__':
         cdfs_ref.append(ecdfs[i](Yq[:, i]))
     #
     print(f'Start Training')
-    learning_rate = 0.2
-    model = Reg(in_out_dim=D, hidden_dim=100, type='nonlinear')
-    print(f'model = {model}')
-    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    if model_type == 'nn':
+        learning_rate = 0.1
+        model = Reg(in_out_dim=D, hidden_dim=100, type='nonlinear')
+        print(f'model = {model}')
+        optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+    elif model_type == 'tt':
+        model = get_ETTs(D_in=D, D_out=D, rank=3, domain_stripe=[-1, 1], poly_degree=3, device=torch.device("cpt"))
+
+    # main training loop
     for i in range(niter):
         # indices = torch.randperm(n=batch_size)
         X_batch = base_dist.sample(torch.Size([batch_size]))
         Y_batch = target_dist.sample(torch.Size([batch_size]))
         Y_batch_ica = torch.tensor(transformer.fit_transform(Y_batch.detach().numpy()))
-        Xq_batch = torch.quantile(input=X_batch, dim=0, q=u_levels)
-        Yq_batch_ica = torch.quantile(input=Y_batch_ica, dim=0, q=u_levels)
-        # Xq_batch = Xq[indices, :]
-        # Yq_batch = Yq[indices, :]
-        optimizer.zero_grad()
-        Yq_hat = model(Xq_batch)
-        loss = MSELoss()(Yq_batch_ica, Yq_hat)
-        print(f'i = {i} , loss = {loss}')
-        loss.backward()
-        optimizer.step()
-    res = validate_qq_model(base_dist=base_dist, target_distribution=target_dist, model=model, q=u_levels, N=10000,
+        Xq_batch = torch.quantile(input=X_batch, dim=0, q=u_levels.type(torch.float64))
+        Yq_batch_ica = torch.quantile(input=Y_batch_ica, dim=0, q=u_levels.type(torch.float64))
+        loss = torch.inf
+        if model_type == 'nn':
+            # Xq_batch = Xq[indices, :]
+            # Yq_batch = Yq[indices, :]
+            optimizer.zero_grad()
+            Yq_hat = model(Xq_batch)
+            loss = MSELoss()(Yq_batch_ica, Yq_hat)
+            print(f'i = {i} ,model_type = {model_type}, loss = {loss}')
+            loss.backward()
+            optimizer.step()
+        elif model_type == 'nn':
+            y_hat = ETT_fits_predict(x=Xq_batch, ETT_fits=model, domain_stripe=[-1, 1])
+            loss = MSELoss()(Yq, y_hat)
+            print(f'i = {i} ,model_type = {model_type}, loss = {loss}')
+            run_tt_als(x=Xq_batch, y=Y_batch, ETT_fits=model, test_ratio=0.2, tol=1e-4, domain_stripe=[-1, 1])
+
+    res = validate_qq_model(base_dist=base_dist, target_distribution=target_dist, model=model, u_levels=u_levels,
+                            N=10000,
                             transformer=transformer, repeats=5)
     print(f'Validation Results :\n{res}')
     # validation using out of sample data

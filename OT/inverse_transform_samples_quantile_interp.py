@@ -5,10 +5,10 @@ https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.wasserstein_dis
 
 plan
 1. Implement a function that takes quantiles and generate samples Done
-2. Test Generated samples using WD distance
-3. Test on Normal, Exp, LogNormal and Empirical Dist from ICA transformation
+2. Test Generated samples using WD distance Done
+3. Test on Normal, Exp, LogNormal and Empirical Dist from ICA transformation - Not Needed Now
 4- Use Cubic Spline
-https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.CubicSpline.html
+https://docs.scipy.org/doc/scipy/reference/generated/scipy.interpolate.CubicSpline.html Done
 """
 import numpy as np
 import torch

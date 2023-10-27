@@ -24,16 +24,16 @@ https://en.wikipedia.org/wiki/Metalog_distribution
 
 
 class Reg(torch.nn.Module):
-    def __init__(self, in_out_dim: int, hidden_dim: int, type: str, *args, **kwargs):
+    def __init__(self, in_dim: int, out_dim: int, hidden_dim: int, type: str, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if type == 'linear':
-            self.model = torch.nn.Linear(in_out_dim, in_out_dim)
+            self.model = torch.nn.Linear(in_dim, out_dim)
         elif type == 'nonlinear':
-            self.model = torch.nn.Sequential(torch.nn.Linear(in_out_dim, hidden_dim),
+            self.model = torch.nn.Sequential(torch.nn.Linear(in_dim, hidden_dim),
                                              torch.nn.ReLU(),
                                              # torch.nn.Linear(hidden_dim, hidden_dim),
                                              # torch.nn.ReLU(),
-                                             torch.nn.Linear(hidden_dim, in_out_dim)
+                                             torch.nn.Linear(hidden_dim, out_dim)
                                              )
 
     def forward(self, x):
@@ -86,28 +86,29 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         # q-q validation
         X_test = base_dist.sample(torch.Size([N]))
         Xq_test = torch.quantile(input=X_test, q=u_levels.type(X_test.dtype), dim=0)
+        Xq_test_aug = torch.cat([Xq_test, u_levels.view(-1, 1)], dim=1)
         Y_test = target_distribution.sample(torch.Size([N]))
         Y_test_ICA = torch.tensor(transformer.fit_transform(Y_test.detach().numpy()))
-        Yq_ICA_test_ref = torch.quantile(input=Y_test_ICA, dim=0, q=u_levels.type(Y_test_ICA.dtype))
-        Yq_pred = model(Xq_test)
+        Yq_comp_test_ref = torch.quantile(input=Y_test_ICA, dim=0, q=u_levels.type(Y_test_ICA.dtype))
+        Yq_pred = model(Xq_test_aug)
 
-        mse = MSELoss()(Yq_ICA_test_ref, Yq_pred).item()
+        mse = MSELoss()(Yq_comp_test_ref, Yq_pred).item()
         mses_qq.append(mse)
         # cdf validation
         for j in range(D):
-            plt.plot(u_levels.detach().numpy(), Yq_ICA_test_ref[:, j].detach().numpy())
+            plt.plot(u_levels.detach().numpy(), Yq_comp_test_ref[:, j].detach().numpy())
             plt.plot(u_levels.detach().numpy(), Yq_pred[:, j].detach().numpy())
             plt.savefig(f'cdf_d_{j}.png')
             plt.clf()
-            plt.plot(Yq_ICA_test_ref[:, j].detach().numpy(), Yq_ICA_test_ref[:, j].detach().numpy())
-            plt.plot(Yq_ICA_test_ref[:, j].detach().numpy(), Yq_pred[:, j].detach().numpy())
+            plt.plot(Yq_comp_test_ref[:, j].detach().numpy(), Yq_comp_test_ref[:, j].detach().numpy())
+            plt.plot(Yq_comp_test_ref[:, j].detach().numpy(), Yq_pred[:, j].detach().numpy())
             plt.savefig(f'qq_d_{j}.png')
             plt.clf()
         mse_cdf_repeat = []
         for j in range(D):
-            y_ica_j = Yq_ICA_test_ref[:, j].detach().numpy()
+            y_ica_j = Yq_comp_test_ref[:, j].detach().numpy()
             ecdf = ECDF(x=y_ica_j)
-            cdf_ref = ecdf(Yq_ICA_test_ref[:, j].detach().numpy())
+            cdf_ref = ecdf(Yq_comp_test_ref[:, j].detach().numpy())
             cdf_est = ecdf(Yq_pred[:, j].detach().numpy())
             plt.clf()
             mse_cdf_j = MSELoss()(torch.tensor(cdf_ref), torch.tensor(cdf_est))
@@ -115,17 +116,20 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         mse_cdfs.append(torch.tensor(mse_cdf_repeat))
         # validate the reconstruction process
         if isinstance(target_distribution, torch.distributions.MultivariateNormal):
-            Y_ica_qinv_sample = torch.stack([
-                uv_sample(Yq=Yq_ICA_test_ref[:, i].reshape(-1), N=N, u_levels=u_levels, u_step=u_step, interp='cubic')
+            Y_comp_qinv_sample = torch.stack([
+                uv_sample(Yq=Yq_pred[:, i].reshape(-1), N=N, u_levels=u_levels, u_step=u_step, interp='cubic')
                 for i in range(D)]).T.type(torch.float32)
             # FIXME remove : set of debug vars
-            # m1 = torch.mean(Y_test_ICA ,dim=0)
-            # m2 = torch.mean(Y_ica_qinv_sample,dim=0)
-            # mse_m_ = MSELoss()(m1,m2)
-            # cov1 = torch.cov(Y_test_ICA.T)
-            # cov2 = torch.cov(Y_ica_qinv_sample.T)
-            # mse_cov_ = MSELoss()(cov1,cov2)
-            Y_recons = torch.tensor(transformer.inverse_transform(Y_ica_qinv_sample.detach().numpy()))
+            Y_comp_qinv_sample = Y_comp_qinv_sample - torch.mean(Y_comp_qinv_sample, dim=0)  # fixme: quick fix
+            s = torch.std(Y_comp_qinv_sample, dim=0)
+            Y_comp_qinv_sample = Y_comp_qinv_sample / s
+            m1 = torch.mean(Y_test_ICA, dim=0)
+            m2 = torch.mean(Y_comp_qinv_sample, dim=0)
+            norm_mean_diff = torch.linalg.norm(m1 - m2)
+            cov1 = torch.cov(Y_test_ICA.T)
+            cov2 = torch.cov(Y_comp_qinv_sample.T)
+            norm_cov_diff = torch.linalg.norm(cov1 - cov2)
+            Y_recons = torch.tensor(transformer.inverse_transform(Y_comp_qinv_sample.detach().numpy()))
             wd_baseline = wasserstein_distance_two_gaussians(m1=target_dist.mean, C1=target_dist.covariance_matrix,
                                                              m2=torch.mean(Y_test, dim=0), C2=torch.cov(Y_test.T))
             wd_recons = wasserstein_distance_two_gaussians(m1=target_dist.mean, C1=target_dist.covariance_matrix,
@@ -146,8 +150,8 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
 if __name__ == '__main__':
     D = 4
     N = 10000
-    batch_size = 8192
-    niter = 20
+    batch_size = 64000
+    niter = 500 # ?? seems to be good enough for good wd_reconstruct vs baseline and to pass mvn hz test
     u_step = 1e-5
     model_types = ['nn', 'tt']
     model_type = 'nn'
@@ -160,6 +164,7 @@ if __name__ == '__main__':
     target_dist_mean = torch.distributions.Uniform(-10, 10).sample(torch.Size([D]))
     A = torch.distributions.Uniform(-5.0, 5.0).sample(torch.Size([D, D]))
     target_dist_cov = torch.matmul(A, A.T)
+    # target_dist_cov = torch.diag(torch.distributions.Uniform(0.9, 5).sample(torch.Size([D])))
     target_dist = torch.distributions.MultivariateNormal(loc=target_dist_mean, covariance_matrix=target_dist_cov)
     print(f'base dist  ={base_dist}, mean = {base_dist.mean}, cov = {base_dist.covariance_matrix}')
     print(f'target dist = {target_dist}, mean = {target_dist.mean}, cov = {target_dist.covariance_matrix}')
@@ -167,12 +172,15 @@ if __name__ == '__main__':
     X = base_dist.sample(torch.Size([N])).type(torch.float32)
     Y = target_dist.sample(torch.Size([N])).type(torch.float32)
     # Apply ICA
-    transformer = FastICA(random_state=0, whiten='unit-variance', max_iter=2000, tol=1e-4)
-    Y_ICA = torch.tensor(transformer.fit_transform(X=Y), dtype=torch.float32)
+    # transformer = FastICA(random_state=0, whiten='unit-variance', max_iter=2000, tol=1e-4)
+    transformer = PCA(whiten=True)
+    Y_comp = torch.tensor(transformer.fit_transform(X=Y), dtype=torch.float32)
+    print(f'mean for Y_comp = {torch.mean(Y_comp, dim=0)}')
+    print(f'cov of Y_comp (Should be diagonal) = {torch.cov(Y_comp.T)}')
     # apply Qinv to Y_ICA and see if it works
-    Y_ICA_q = torch.quantile(input=Y_ICA, q=u_levels, dim=0)
-    Y_ICA_qinv = torch.stack(
-        [uv_sample(Yq=Y_ICA_q[:, i].reshape(-1), N=N, u_levels=u_levels, u_step=u_step, interp='cubic')
+    Y_comp_q = torch.quantile(input=Y_comp, q=u_levels, dim=0)
+    Y_comp_qinv = torch.stack(
+        [uv_sample(Yq=Y_comp_q[:, i].reshape(-1), N=N, u_levels=u_levels, u_step=u_step, interp='cubic')
          for i in range(D)]).T
     # m1 = torch.mean(Y_ICA, dim=0)
     # m2 = torch.mean(Y_ICA_qinv, dim=0)
@@ -186,27 +194,27 @@ if __name__ == '__main__':
     2. Test mean , cov and normality 
     the step test the "Re-construct-ability" of the target distribution after ICA  
     """
-    Y_recons = torch.tensor(transformer.inverse_transform(Y_ICA.detach().numpy()))
+    Y_recons = torch.tensor(transformer.inverse_transform(Y_comp.detach().numpy()))
     print(
         f'MSE for reconstructed vs actual sample mean = {MSELoss()(torch.mean(Y, dim=0), torch.mean(Y_recons, dim=0))}')
     print(f'MSE for reconstructed vs actual sample cov  = {MSELoss()(torch.cov(Y.T), torch.cov(Y_recons.T))}')
-    target_sample_mvn_test = pg.multivariate_normality(X=Y)
+    target_direct_sample_mvn_test = pg.multivariate_normality(X=Y)
     # FIXME , find a better way for assertion
     # assert target_sample_mvn_test.normal, f"Raw target sample failed the mvn test , res = {target_sample_mvn_test}"
-    target_sample_ica_mvn_test = pg.multivariate_normality(X=Y_ICA)
-    print(f'Normality test for the actual sample = {target_sample_mvn_test}')
-    print(f'Normality test for the reconstructed sample = {target_sample_ica_mvn_test}')
+    target_recons_test = pg.multivariate_normality(X=Y_recons)
+    print(f'Normality test for the actual sample = {target_direct_sample_mvn_test}')
+    print(f'Normality test for the reconstructed sample = {target_recons_test}')
     # create empirical cdf functions
     ecdfs = []
 
     for i in range(D):
-        y_ica_i = Y_ICA[:, i].detach().numpy()
-        ecdf = ECDF(x=y_ica_i)
+        y_comp_i = Y_comp[:, i].detach().numpy()
+        ecdf = ECDF(x=y_comp_i)
         ecdfs.append(ecdf)
 
     #
     # set targets and predictors
-    Yq = torch.quantile(input=Y_ICA, q=u_levels, dim=0)
+    Yq = torch.quantile(input=Y_comp, q=u_levels, dim=0)
     Xq = torch.quantile(input=X, q=u_levels, dim=0)
     # test the ecdf
     cdfs_ref = []
@@ -215,29 +223,32 @@ if __name__ == '__main__':
     #
     print(f'Start Training')
     if model_type == 'nn':
-        learning_rate = 0.1
-        model = Reg(in_out_dim=D, hidden_dim=100, type='nonlinear')
+        learning_rate = 0.05
+        model = Reg(in_dim=D + 1, out_dim=D, hidden_dim=100, type='linear')
         print(f'model = {model}')
         optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     elif model_type == 'tt':
         model = get_ETTs(D_in=D, D_out=D, rank=3, domain_stripe=[-1, 1], poly_degree=3, device=torch.device("cpt"))
-
+    losses = []
     # main training loop
     for i in range(niter):
         # indices = torch.randperm(n=batch_size)
         X_batch = base_dist.sample(torch.Size([batch_size]))
         Y_batch = target_dist.sample(torch.Size([batch_size]))
-        Y_batch_ica = torch.tensor(transformer.fit_transform(Y_batch.detach().numpy()))
+        Y_batch_comp = torch.tensor(transformer.fit_transform(Y_batch.detach().numpy()))
         Xq_batch = torch.quantile(input=X_batch, dim=0, q=u_levels.type(torch.float64))
-        Yq_batch_ica = torch.quantile(input=Y_batch_ica, dim=0, q=u_levels.type(torch.float64))
-        loss = torch.inf
+        Xq_batch_aug = torch.cat([Xq_batch, u_levels.view(-1, 1)], dim=1)
+        Yq_batch_comp = torch.quantile(input=Y_batch_comp, dim=0, q=u_levels.type(torch.float64))
+        loss = None
         if model_type == 'nn':
             # Xq_batch = Xq[indices, :]
             # Yq_batch = Yq[indices, :]
             optimizer.zero_grad()
-            Yq_hat = model(Xq_batch)
-            loss = MSELoss()(Yq_batch_ica, Yq_hat)
-            print(f'i = {i} ,model_type = {model_type}, loss = {loss}')
+            Yq_hat = model(Xq_batch_aug)
+
+            loss = MSELoss()(Yq_batch_comp, Yq_hat)
+            losses.append(loss.item())
+            print(f'i = {i + 1} ,model_type = {model_type}, avg-running-loss = {np.mean(losses[-10:])}')
             loss.backward()
             optimizer.step()
         elif model_type == 'nn':

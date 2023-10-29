@@ -129,7 +129,7 @@ if __name__ == '__main__':
     train_summary['in_sample']['cov_rmse_benchmark'] = cov_benchmark_rmse
     train_summary['in_sample']['mean_rmse_recons'] = mean_recons_rmse
     train_summary['in_sample']['cov_rmse_recons'] = cov_recons_rmse
-
+    # TODO out of sample regression testing
     print(f'train-summary:\n {train_summary}')
 
 """

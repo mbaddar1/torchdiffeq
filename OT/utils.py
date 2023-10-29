@@ -1,14 +1,149 @@
 import logging
 from typing import List
 
+import numpy as np
+import random
 import torch
+from matplotlib import pyplot as plt
+from scipy.interpolate import CubicSpline
+from sklearn.decomposition import PCA
+from statsmodels.distributions import ECDF
 from torch.linalg import multi_dot
 from torch.nn import MSELoss
-
+import pingouin as pg
 from GMSOC.functional_tt_fabrique import orthpoly, Extended_TensorTrain
 from OT.sqrtm import sqrtm
 
 
+def uv_sample(Yq: torch.Tensor, N: int, u_levels: torch.Tensor, u_step: float, interp: str) -> torch.Tensor:
+    """
+    There is some kind of redundancy in parameters. It's intentional and try to alleviate it by some assertions
+    :param interp:
+    :param u_step:
+    :param u_levels:
+    :param Yq:
+    :param N:
+    :return:
+    """
+    # interpolation methods
+    interp_methods = ["linear", "cubic"]
+    # some assertions for params
+    assert interp in interp_methods, f"interp param must be one of {interp_methods}"
+    eps = 1e-6
+    Yq_size = Yq.size()
+    assert len(Yq_size) == 1, "Yq must be of 1 dim"
+    u_levels_size = u_levels.size()
+    assert (len(u_levels.size()) == 1), "u_levels must be of dim 1"
+    assert u_levels_size[0] == Yq_size[0], "Yq must have same 1-dim size as u_levels"
+    assert np.abs(u_levels[0] - 0) <= eps, "u_levels[0] must be 0"
+    assert np.abs(u_levels[-1] - 1) <= eps, "u_levels[-1] must be 1"
+    assert np.abs(u_step - 1.0 / (u_levels_size[0] - 1)) <= eps, "u_levels size must compatible with u_step"
+    #
+    u_sample = torch.distributions.Uniform(0, 1).sample(torch.Size([N]))
+    Y_sample = None
+    if interp == 'linear':
+        idx_low = torch.floor(u_sample / u_step).type(torch.int)
+        idx_high = idx_low + 1
+        u_low = u_levels[idx_low]
+        u_high = u_levels[idx_high]
+        Yq_low = Yq[idx_low]
+        Yq_high = Yq[idx_high]
+        m = (u_sample - u_low) / (u_high - u_low)
+        Y_sample = torch.mul(m, Yq_high - Yq_low) + Yq_low
+    elif interp == 'cubic':
+        cs = CubicSpline(x=u_levels.detach().numpy(), y=Yq.detach().numpy())
+        Y_sample_np = cs(u_sample.detach().numpy())
+        Y_sample = torch.tensor(Y_sample_np, dtype=torch.float32)
+    else:
+        raise ValueError(f'Invalid interp param val = {interp} : must be one of {interp_methods}')
+    return Y_sample
+
+
+def check_wd(wd: float, wd_thresh: float):
+    if wd <= wd_thresh:
+        print(f"wd is small enough : {wd} <= {wd_thresh}")
+    else:
+        print(f'wd is large  = {wd} >= {wd_thresh}')
+
+
+def validate_qq_model(base_dist: torch.distributions.Distribution,
+                      target_dist: torch.distributions.Distribution, model: torch.nn.Module, N: int,
+                      u_levels: torch.Tensor, transformer, repeats: int, D: int) -> dict:
+    mses_qq = []
+    mse_cdfs = []
+    wd_list = []
+    mvn_hz_test_res_list = []
+    for i in range(repeats):
+        print(f'validation iteration {i + 1} out of {repeats}')
+        # q-q validation
+        X_test = base_dist.sample(torch.Size([N]))
+        Xq_test = torch.quantile(input=X_test, q=u_levels.type(X_test.dtype), dim=0)
+        Xq_test_aug = torch.cat([Xq_test, u_levels.view(-1, 1)], dim=1)
+        Y_test = target_dist.sample(torch.Size([N]))
+        Y_test_ICA = torch.tensor(transformer.fit_transform(Y_test.detach().numpy()))
+        Yq_comp_test_ref = torch.quantile(input=Y_test_ICA, dim=0, q=u_levels.type(Y_test_ICA.dtype))
+        Yq_pred = model(Xq_test_aug)
+
+        mse = MSELoss()(Yq_comp_test_ref, Yq_pred).item()
+        mses_qq.append(mse)
+        # cdf validation
+        for j in range(D):
+            plt.plot(u_levels.detach().numpy(), Yq_comp_test_ref[:, j].detach().numpy())
+            plt.plot(u_levels.detach().numpy(), Yq_pred[:, j].detach().numpy())
+            plt.savefig(f'cdf_d_{j}.png')
+            plt.clf()
+            plt.plot(Yq_comp_test_ref[:, j].detach().numpy(), Yq_comp_test_ref[:, j].detach().numpy())
+            plt.plot(Yq_comp_test_ref[:, j].detach().numpy(), Yq_pred[:, j].detach().numpy())
+            plt.savefig(f'qq_d_{j}.png')
+            plt.clf()
+        mse_cdf_repeat = []
+        for j in range(D):
+            y_ica_j = Yq_comp_test_ref[:, j].detach().numpy()
+            ecdf = ECDF(x=y_ica_j)
+            cdf_ref = ecdf(Yq_comp_test_ref[:, j].detach().numpy())
+            cdf_est = ecdf(Yq_pred[:, j].detach().numpy())
+            plt.clf()
+            mse_cdf_j = MSELoss()(torch.tensor(cdf_ref), torch.tensor(cdf_est))
+            mse_cdf_repeat.append(mse_cdf_j)
+        mse_cdfs.append(torch.tensor(mse_cdf_repeat))
+        # validate the reconstruction process
+        if isinstance(target_dist, torch.distributions.MultivariateNormal):
+            Y_comp_qinv_sample = torch.stack([
+                uv_sample(Yq=Yq_pred[:, i].reshape(-1), N=N, u_levels=u_levels, u_step=u_step, interp='cubic')
+                for i in range(D)]).T.type(torch.float32)
+            # FIXME remove : set of debug vars
+            # Y_comp_qinv_sample = Y_comp_qinv_sample - torch.mean(Y_comp_qinv_sample, dim=0)  # fixme: quick fix
+            trans = PCA()
+            Y_comp_qinv_sample_corrected = torch.tensor(trans.fit_transform(Y_comp_qinv_sample))
+            m3 = torch.mean(Y_comp_qinv_sample_corrected, dim=0)
+            cov3 = torch.cov(Y_comp_qinv_sample_corrected.T)
+            s = torch.std(Y_comp_qinv_sample, dim=0)
+            # Y_comp_qinv_sample = Y_comp_qinv_sample / s
+            m1 = torch.mean(Y_test_ICA, dim=0)
+            m2 = torch.mean(Y_comp_qinv_sample, dim=0)
+            norm_mean_diff = torch.linalg.norm(m1 - m2)
+            cov1 = torch.cov(Y_test_ICA.T)
+            cov2 = torch.cov(Y_comp_qinv_sample.T)
+            norm_cov_diff = torch.linalg.norm(cov1 - cov2)
+            Y_recons = torch.tensor(transformer.inverse_transform(Y_comp_qinv_sample_corrected.detach().numpy()))
+            wd_baseline = wasserstein_distance_two_gaussians(m1=target_dist.mean, C1=target_dist.covariance_matrix,
+                                                             m2=torch.mean(Y_test, dim=0), C2=torch.cov(Y_test.T))
+            wd_recons = wasserstein_distance_two_gaussians(m1=target_dist.mean, C1=target_dist.covariance_matrix,
+                                                           m2=torch.mean(Y_recons, dim=0), C2=torch.cov(Y_recons.T))
+            mvn_hz_baseline = pg.multivariate_normality(X=Y_test.detach().numpy())
+            mvn_hz_recons = pg.multivariate_normality(X=Y_recons.detach().numpy())
+            wd_list.append({'baseline': wd_baseline, 'reconstruct': wd_recons})
+            mvn_hz_test_res_list.append({'baseline': mvn_hz_baseline, 'reconstruct': mvn_hz_recons})
+
+    res = dict()
+    res['ica_qq_mses'] = mses_qq
+    res['cdf_mses'] = mse_cdfs
+    res['wd'] = wd_list
+    res['mvn_hz'] = mvn_hz_test_res_list
+    return res
+
+
+##############
 def is_matrix_positive_definite(M: torch.Tensor, semi: bool) -> bool:
     """
     https://www.math.utah.edu/~zwick/Classes/Fall2012_2270/Lectures/Lecture33_with_Examples.pdf
@@ -221,10 +356,9 @@ def ETT_fits_predict(ETT_fits: List[Extended_TensorTrain], x: torch.Tensor,
 
     for d in range(Dx):
         assert len(ETT_fits[d].tt.dims) == Dx, (f"ETT order (num of degrees)  must = Dz_aug : "
-                                                    f"{len(ETT_fits[d].tt.dims)} != {Dx}")
+                                                f"{len(ETT_fits[d].tt.dims)} != {Dx}")
         ETT_fits[d].tt.set_core(Dx - 1)
         yd_hat = ETT_fits[d](x_domain_adjusted)
         yd_hat_list.append(yd_hat)
     y_hat = torch.cat(tensors=yd_hat_list, dim=1)
     return y_hat
-

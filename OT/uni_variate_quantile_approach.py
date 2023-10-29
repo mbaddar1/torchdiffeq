@@ -23,135 +23,15 @@ https://en.wikipedia.org/wiki/Metalog_distribution
 """
 
 
-class Reg(torch.nn.Module):
-    def __init__(self, in_dim: int, out_dim: int, hidden_dim: int, type: str, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if type == 'linear':
-            self.model = torch.nn.Linear(in_dim, out_dim)
-        elif type == 'nonlinear':
-            self.model = torch.nn.Sequential(torch.nn.Linear(in_dim, hidden_dim),
-                                             torch.nn.ReLU(),
-                                             # torch.nn.Linear(hidden_dim, hidden_dim),
-                                             # torch.nn.ReLU(),
-                                             torch.nn.Linear(hidden_dim, out_dim)
-                                             )
-
-    def forward(self, x):
-        return self.model(x)
 
 
-def univariate_inv_sample(Yq_d: torch.Tensor, u: torch.Tensor):
-    N = Yq_d.size()[0]
-    step = 1.0 / (N - 1)
-    i = torch.floor(u / step).type(torch.int)
-    u1 = i * step
-    u2 = u1 + step
-    m = (u - u1) / (u2 - u1)
-    s1 = Yq_d[i]
-    s2 = Yq_d[i + 1]
-    s = m * (s2 - s1) + s1
-    return s
-
-
-def multivariate_inv_sample(Yq: torch.Tensor, N_samples: int):
-    D = Yq.size()[1]
-    N = Yq.size()[0]
-    eps = 1e-4
-    u = torch.distributions.Uniform(0 + eps, 1 - eps).sample(torch.Size([N_samples])).view(-1, 1)
-    samples_list = []
-    for d in range(D):
-        Yq_d = Yq[:, d]
-        samples = torch.vmap(lambda x: univariate_inv_sample(Yq_d=Yq_d, u=x), in_dims=0)(u)
-        samples_list.append(samples)
-
-    # internal assertion
-    for j in range(len(samples_list)):
-        Yq_ref = Yq[:, j]
-        Yq_d_est = torch.quantile(q=torch.tensor(list(np.arange(0, 1 + eps, 1.0 / (N - 1))), dtype=torch.float32),
-                                  input=samples_list[j], dim=0)
-        abs_diff = torch.abs(Yq_ref - Yq_d_est)
-        mse_ = MSELoss()(Yq_d_est, Yq_ref)
-    return torch.cat(samples_list, dim=1)
-
-
-def validate_qq_model(base_dist: torch.distributions.Distribution,
-                      target_distribution: torch.distributions.Distribution, model: torch.nn.Module, N: int,
-                      u_levels: torch.Tensor, transformer: FastICA, repeats: int) -> dict:
-    mses_qq = []
-    mse_cdfs = []
-    wd_list = []
-    mvn_hz_test_res_list = []
-    for i in range(repeats):
-        print(f'validation iteration {i + 1} out of {repeats}')
-        # q-q validation
-        X_test = base_dist.sample(torch.Size([N]))
-        Xq_test = torch.quantile(input=X_test, q=u_levels.type(X_test.dtype), dim=0)
-        Xq_test_aug = torch.cat([Xq_test, u_levels.view(-1, 1)], dim=1)
-        Y_test = target_distribution.sample(torch.Size([N]))
-        Y_test_ICA = torch.tensor(transformer.fit_transform(Y_test.detach().numpy()))
-        Yq_comp_test_ref = torch.quantile(input=Y_test_ICA, dim=0, q=u_levels.type(Y_test_ICA.dtype))
-        Yq_pred = model(Xq_test_aug)
-
-        mse = MSELoss()(Yq_comp_test_ref, Yq_pred).item()
-        mses_qq.append(mse)
-        # cdf validation
-        for j in range(D):
-            plt.plot(u_levels.detach().numpy(), Yq_comp_test_ref[:, j].detach().numpy())
-            plt.plot(u_levels.detach().numpy(), Yq_pred[:, j].detach().numpy())
-            plt.savefig(f'cdf_d_{j}.png')
-            plt.clf()
-            plt.plot(Yq_comp_test_ref[:, j].detach().numpy(), Yq_comp_test_ref[:, j].detach().numpy())
-            plt.plot(Yq_comp_test_ref[:, j].detach().numpy(), Yq_pred[:, j].detach().numpy())
-            plt.savefig(f'qq_d_{j}.png')
-            plt.clf()
-        mse_cdf_repeat = []
-        for j in range(D):
-            y_ica_j = Yq_comp_test_ref[:, j].detach().numpy()
-            ecdf = ECDF(x=y_ica_j)
-            cdf_ref = ecdf(Yq_comp_test_ref[:, j].detach().numpy())
-            cdf_est = ecdf(Yq_pred[:, j].detach().numpy())
-            plt.clf()
-            mse_cdf_j = MSELoss()(torch.tensor(cdf_ref), torch.tensor(cdf_est))
-            mse_cdf_repeat.append(mse_cdf_j)
-        mse_cdfs.append(torch.tensor(mse_cdf_repeat))
-        # validate the reconstruction process
-        if isinstance(target_distribution, torch.distributions.MultivariateNormal):
-            Y_comp_qinv_sample = torch.stack([
-                uv_sample(Yq=Yq_pred[:, i].reshape(-1), N=N, u_levels=u_levels, u_step=u_step, interp='cubic')
-                for i in range(D)]).T.type(torch.float32)
-            # FIXME remove : set of debug vars
-            Y_comp_qinv_sample = Y_comp_qinv_sample - torch.mean(Y_comp_qinv_sample, dim=0)  # fixme: quick fix
-            s = torch.std(Y_comp_qinv_sample, dim=0)
-            Y_comp_qinv_sample = Y_comp_qinv_sample / s
-            m1 = torch.mean(Y_test_ICA, dim=0)
-            m2 = torch.mean(Y_comp_qinv_sample, dim=0)
-            norm_mean_diff = torch.linalg.norm(m1 - m2)
-            cov1 = torch.cov(Y_test_ICA.T)
-            cov2 = torch.cov(Y_comp_qinv_sample.T)
-            norm_cov_diff = torch.linalg.norm(cov1 - cov2)
-            Y_recons = torch.tensor(transformer.inverse_transform(Y_comp_qinv_sample.detach().numpy()))
-            wd_baseline = wasserstein_distance_two_gaussians(m1=target_dist.mean, C1=target_dist.covariance_matrix,
-                                                             m2=torch.mean(Y_test, dim=0), C2=torch.cov(Y_test.T))
-            wd_recons = wasserstein_distance_two_gaussians(m1=target_dist.mean, C1=target_dist.covariance_matrix,
-                                                           m2=torch.mean(Y_recons, dim=0), C2=torch.cov(Y_recons.T))
-            mvn_hz_baseline = pg.multivariate_normality(X=Y_test.detach().numpy())
-            mvn_hz_recons = pg.multivariate_normality(X=Y_recons.detach().numpy())
-            wd_list.append({'baseline': wd_baseline, 'reconstruct': wd_recons})
-            mvn_hz_test_res_list.append({'baseline': mvn_hz_baseline, 'reconstruct': mvn_hz_recons})
-
-    res = dict()
-    res['ica_qq_mses'] = mses_qq
-    res['cdf_mses'] = mse_cdfs
-    res['wd'] = wd_list
-    res['mvn_hz'] = mvn_hz_test_res_list
-    return res
 
 
 if __name__ == '__main__':
     D = 4
     N = 10000
-    batch_size = 64000
-    niter = 500 # ?? seems to be good enough for good wd_reconstruct vs baseline and to pass mvn hz test
+    batch_size = 4000
+    niter = 2000  # ?? seems to be good enough for good wd_reconstruct vs baseline and to pass mvn hz test
     u_step = 1e-5
     model_types = ['nn', 'tt']
     model_type = 'nn'
@@ -223,8 +103,8 @@ if __name__ == '__main__':
     #
     print(f'Start Training')
     if model_type == 'nn':
-        learning_rate = 0.05
-        model = Reg(in_dim=D + 1, out_dim=D, hidden_dim=100, type='linear')
+        learning_rate = 0.1
+        model = Reg(in_dim=D + 1, out_dim=D, hidden_dim=50, type='linear')
         print(f'model = {model}')
         optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     elif model_type == 'tt':
@@ -265,6 +145,7 @@ if __name__ == '__main__':
     # print(f'In-sample validation')
     # X_test = base_dist.sample(torch.Size([N]))
     # Xq_test = torch.quantile(input=X, q=q, dim=0)
+    # Y_test =
     # Y_test =
     # Yq_test_hat = model(Xq_test)
     # cdfs_test = []

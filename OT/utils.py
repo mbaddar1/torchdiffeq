@@ -6,7 +6,7 @@ import random
 import torch
 from matplotlib import pyplot as plt
 from scipy.interpolate import CubicSpline
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, IncrementalPCA
 from statsmodels.distributions import ECDF
 from torch.linalg import multi_dot
 from torch.nn import MSELoss
@@ -68,7 +68,8 @@ def check_wd(wd: float, wd_thresh: float):
 
 def validate_qq_model(base_dist: torch.distributions.Distribution,
                       target_dist: torch.distributions.Distribution, model: torch.nn.Module, N: int,
-                      u_levels: torch.Tensor, transformer, repeats: int, D: int) -> dict:
+                      p_levels: torch.Tensor, p_step: float, train_transformer: IncrementalPCA, repeats: int, D: int,
+                      torch_dtype: torch.dtype, torch_device: torch.device) -> dict:
     mses_qq = []
     mse_cdfs = []
     wd_list = []
@@ -77,19 +78,21 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         print(f'validation iteration {i + 1} out of {repeats}')
         # q-q validation
         X_test = base_dist.sample(torch.Size([N]))
-        Xq_test = torch.quantile(input=X_test, q=u_levels.type(X_test.dtype), dim=0)
-        Xq_test_aug = torch.cat([Xq_test, u_levels.view(-1, 1)], dim=1)
-        Y_test = target_dist.sample(torch.Size([N]))
-        Y_test_ICA = torch.tensor(transformer.fit_transform(Y_test.detach().numpy()))
-        Yq_comp_test_ref = torch.quantile(input=Y_test_ICA, dim=0, q=u_levels.type(Y_test_ICA.dtype))
-        Yq_pred = model(Xq_test_aug)
+        Xq_test = torch.quantile(input=X_test, q=p_levels.type(X_test.dtype), dim=0).type(torch_dtype).to(torch_device)
+        # Xq_test_aug = torch.cat([Xq_test, u_levels.view(-1, 1)], dim=1)
+        Y_test = target_dist.sample(torch.Size([N])).type(torch_dtype).to(torch_device)
+        # ic => indep components
+        Y_test_ic = torch.tensor(IncrementalPCA(whiten=train_transformer.whiten).fit_transform(Y_test.detach().numpy()),
+                                 dtype=torch_dtype, device=torch_device)
+        Yq_comp_test_ref = torch.quantile(input=Y_test_ic, dim=0, q=p_levels.type(Y_test_ic.dtype))
+        Yq_pred = model(Xq_test)
 
         mse = MSELoss()(Yq_comp_test_ref, Yq_pred).item()
         mses_qq.append(mse)
         # cdf validation
         for j in range(D):
-            plt.plot(u_levels.detach().numpy(), Yq_comp_test_ref[:, j].detach().numpy())
-            plt.plot(u_levels.detach().numpy(), Yq_pred[:, j].detach().numpy())
+            plt.plot(p_levels.detach().numpy(), Yq_comp_test_ref[:, j].detach().numpy())
+            plt.plot(p_levels.detach().numpy(), Yq_pred[:, j].detach().numpy())
             plt.savefig(f'cdf_d_{j}.png')
             plt.clf()
             plt.plot(Yq_comp_test_ref[:, j].detach().numpy(), Yq_comp_test_ref[:, j].detach().numpy())
@@ -109,27 +112,19 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         # validate the reconstruction process
         if isinstance(target_dist, torch.distributions.MultivariateNormal):
             Y_comp_qinv_sample = torch.stack([
-                uv_sample(Yq=Yq_pred[:, i].reshape(-1), N=N, u_levels=u_levels, u_step=u_step, interp='cubic')
-                for i in range(D)]).T.type(torch.float32)
+                uv_sample(Yq=Yq_pred[:, i].reshape(-1), N=N, u_levels=p_levels, u_step=p_step, interp='cubic')
+                for i in range(D)]).T.type(torch_dtype).to(torch_device)
             # FIXME remove : set of debug vars
             # Y_comp_qinv_sample = Y_comp_qinv_sample - torch.mean(Y_comp_qinv_sample, dim=0)  # fixme: quick fix
-            trans = PCA()
-            Y_comp_qinv_sample_corrected = torch.tensor(trans.fit_transform(Y_comp_qinv_sample))
-            m3 = torch.mean(Y_comp_qinv_sample_corrected, dim=0)
-            cov3 = torch.cov(Y_comp_qinv_sample_corrected.T)
-            s = torch.std(Y_comp_qinv_sample, dim=0)
-            # Y_comp_qinv_sample = Y_comp_qinv_sample / s
-            m1 = torch.mean(Y_test_ICA, dim=0)
-            m2 = torch.mean(Y_comp_qinv_sample, dim=0)
-            norm_mean_diff = torch.linalg.norm(m1 - m2)
-            cov1 = torch.cov(Y_test_ICA.T)
-            cov2 = torch.cov(Y_comp_qinv_sample.T)
-            norm_cov_diff = torch.linalg.norm(cov1 - cov2)
-            Y_recons = torch.tensor(transformer.inverse_transform(Y_comp_qinv_sample_corrected.detach().numpy()))
+
+            Y_recons = torch.tensor(train_transformer.inverse_transform(Y_comp_qinv_sample.detach().numpy())).type(
+                torch_dtype).to(torch_device)
             wd_baseline = wasserstein_distance_two_gaussians(m1=target_dist.mean, C1=target_dist.covariance_matrix,
                                                              m2=torch.mean(Y_test, dim=0), C2=torch.cov(Y_test.T))
+            mean_recons = torch.mean(Y_recons, dim=0)
+            cov_recons = torch.cov(Y_recons.T)
             wd_recons = wasserstein_distance_two_gaussians(m1=target_dist.mean, C1=target_dist.covariance_matrix,
-                                                           m2=torch.mean(Y_recons, dim=0), C2=torch.cov(Y_recons.T))
+                                                           m2=mean_recons, C2=cov_recons)
             mvn_hz_baseline = pg.multivariate_normality(X=Y_test.detach().numpy())
             mvn_hz_recons = pg.multivariate_normality(X=Y_recons.detach().numpy())
             wd_list.append({'baseline': wd_baseline, 'reconstruct': wd_recons})

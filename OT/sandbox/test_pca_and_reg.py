@@ -12,26 +12,26 @@ import datetime
 import pingouin as pg
 import numpy as np
 import torch.distributions
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, IncrementalPCA
 from torch.nn import MSELoss
 import random
 from OT.models import Reg
 from OT.utils import uv_sample, wasserstein_distance_two_gaussians
 
-#
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
+SEED = None
+# random.seed(SEED)
+# np.random.seed(SEED)
+# torch.manual_seed(SEED)
 #
 if __name__ == '__main__':
     torch_dtype = torch.float64
     torch_device = torch.device('cpu')
     D = 4
-    N = 100000
+    # N = 100000
+    batch_size = 4096
     p_step = 1e-6
     p_levels = torch.arange(0, 1.0 + p_step, p_step, dtype=torch_dtype, device=torch_device)
-    niter = 300
+    niter = 200
     avg_loss_window = 50
     start_train_timestamp = datetime.datetime.now().isoformat()
     # get train data
@@ -40,12 +40,9 @@ if __name__ == '__main__':
     target_dist_cov = torch.matmul(A, A.T).type(torch_dtype)
     target_dist = torch.distributions.MultivariateNormal(loc=target_dist_mean, covariance_matrix=target_dist_cov)
     print(f'target_dist = {target_dist}')
-    Y = target_dist.sample(torch.Size([N])).type(torch_dtype).to(torch_device)
     # PCA
-    transformer = PCA(whiten=True)
-    Y_indep_comp = torch.tensor(transformer.fit_transform(Y.detach().numpy()), dtype=torch_dtype, device=torch_device)
-    print(f'cov for Y_indep_comp used for training {torch.cov(Y_indep_comp.T)}')
-    Y_indep_comp_q = torch.quantile(input=Y_indep_comp, q=p_levels, dim=0).type(torch_dtype).to(torch_device)
+    train_transformer = IncrementalPCA(whiten=True)
+    # print(f'cov for Y_indep_comp used for training {torch.cov(Y_indep_comp.T)}')
     # model init
     learning_rate = 0.1
     model = Reg(in_dim=D, out_dim=D, hidden_dim=50, model_type='linear', torch_dtype=torch_dtype,
@@ -54,6 +51,16 @@ if __name__ == '__main__':
     optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
     losses = []
     for i in range(niter):
+        # get batch of Data
+        Y = target_dist.sample(torch.Size([batch_size])).type(torch_dtype).to(torch_device)
+        train_transformer.partial_fit(X=Y.detach().numpy())
+        Y_indep_comp = torch.tensor(train_transformer.transform(Y.detach().numpy()), dtype=torch_dtype,
+                                    device=torch_device)
+        # debug var
+        m = torch.mean(Y_indep_comp, dim=0)
+        C = torch.cov(Y_indep_comp.T)
+        Y_indep_comp_q = torch.quantile(input=Y_indep_comp, q=p_levels, dim=0).type(torch_dtype).to(torch_device)
+        # start opt
         optimizer.zero_grad()
         # self reg model
         Y_indep_comp_q_hat = model(Y_indep_comp_q)
@@ -72,15 +79,18 @@ if __name__ == '__main__':
     train_summary['torch_dtype'] = torch_dtype
     train_summary['torch_device'] = torch_device
     train_summary['niter'] = niter
-    train_summary['N'] = N
+    # train_summary['N'] = N
+    train_summary['batch_size'] = batch_size
     train_summary['lr'] = learning_rate
     train_summary['model'] = str(model)
     train_summary['latest_loss'] = losses[-1]
 
     # I) In-Sample Testing
+    # FIXME , it relies implicitly on the latest batch
     Y_indep_comp_q_pred_test = model(Y_indep_comp_q)
     Y_indep_comp_qinv_sample = torch.stack([
-        uv_sample(Yq=Y_indep_comp_q_pred_test[:, i].reshape(-1), N=N, u_levels=p_levels, u_step=p_step, interp='cubic')
+        uv_sample(Yq=Y_indep_comp_q_pred_test[:, i].reshape(-1), N=batch_size, u_levels=p_levels, u_step=p_step,
+                  interp='cubic')
         for i in range(D)]).T.type(torch_dtype)
     print(f'Mean Y_indep_comp_qinv_sample = {torch.mean(Y_indep_comp_qinv_sample, dim=0)}')
     print(f'Covariance reconstruct = {torch.cov(Y_indep_comp_qinv_sample.T)}')
@@ -90,23 +100,23 @@ if __name__ == '__main__':
     1. predict Yq
     2. Apply Q-inv sampling to get the sample
     """
-    Y_reconstruct = torch.tensor(transformer.inverse_transform(Y_indep_comp_qinv_sample), dtype=torch_dtype,
+    Y_reconstruct = torch.tensor(train_transformer.inverse_transform(Y_indep_comp_qinv_sample), dtype=torch_dtype,
                                  device=torch_device)
     mean_recons = torch.mean(Y_reconstruct, dim=0)
     cov_recons = torch.cov(Y_reconstruct.T)
 
     # WD Q-inv and Direct sampling
-    Y_benchmark = target_dist.sample(torch.Size([N]))
+    Y_benchmark = target_dist.sample(torch.Size([batch_size]))
     mean_benchmark = torch.mean(Y_benchmark, dim=0)
     cov_benchmark = torch.cov(Y_benchmark.T)
     wd_benchmark = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=mean_benchmark,
                                                       C1=target_dist.covariance_matrix, C2=cov_benchmark)
     wd_reconstruct = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=mean_recons,
                                                         C1=target_dist.covariance_matrix, C2=cov_recons)
-    N_hz = 10000
-    perm = torch.randperm(N_hz)
-    mvn_hz_benchmark = pg.multivariate_normality(X=Y_benchmark[perm[:N_hz], :].detach().numpy())
-    mvn_hz_reconstruct = pg.multivariate_normality(X=Y_reconstruct[perm[:N_hz], :].detach().numpy())
+    # N_hz = 10000
+
+    mvn_hz_benchmark = pg.multivariate_normality(X=Y_benchmark.detach().numpy())
+    mvn_hz_reconstruct = pg.multivariate_normality(X=Y_reconstruct.detach().numpy())
     mean_norm_diff = torch.linalg.norm(mean_benchmark - mean_recons)
     cov_norm_diff = torch.linalg.norm(cov_benchmark - cov_recons)
     mean_benchmark_rmse = torch.sqrt(torch.mean((target_dist.mean - mean_benchmark) ** 2))
@@ -129,7 +139,42 @@ if __name__ == '__main__':
     train_summary['in_sample']['cov_rmse_benchmark'] = cov_benchmark_rmse
     train_summary['in_sample']['mean_rmse_recons'] = mean_recons_rmse
     train_summary['in_sample']['cov_rmse_recons'] = cov_recons_rmse
+
     # TODO out of sample regression testing
+    # out of sample testing
+    Y_out_of_sample = target_dist.sample(torch.Size([batch_size])).type(torch_dtype)
+    mean_out_of_sample = torch.mean(Y_out_of_sample, dim=0)
+    cov_out_of_sample = torch.cov(Y_out_of_sample.T)
+    wd_out_of_sample_benchmark = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=mean_out_of_sample,
+                                                                    C1=target_dist.covariance_matrix,
+                                                                    C2=cov_out_of_sample)
+    mvz_hz_out_of_sample_benchmark = pg.multivariate_normality(X=Y_out_of_sample.detach().numpy())
+    # TODO : pay attention => transform not fit transform
+    Y_out_of_sample_indep_comp = torch.tensor(PCA(whiten=True).fit_transform(Y_out_of_sample.detach().numpy()))
+    Yq_indepcomp_outofsample = torch.quantile(Y_out_of_sample_indep_comp, dim=0, q=p_levels)
+    Yq_indepcomp_outofsample_pred = model(Yq_indepcomp_outofsample)
+    Y_out_of_sample_indep_comp_qinv_pred = torch.stack([
+        uv_sample(Yq=Yq_indepcomp_outofsample_pred[:, j].reshape(-1), N=batch_size,
+                  u_levels=p_levels, u_step=p_step, interp='cubic') for j in
+        range(D)]).type(torch_dtype).T
+    # FIXME : Hack
+    # Y_out_of_sample_indep_comp_qinv_pred = torch.tensor(
+    #     PCA(whiten=True).fit_transform(Y_out_of_sample_indep_comp_qinv_pred.detach().numpy()))
+    c = torch.cov(Y_out_of_sample_indep_comp_qinv_pred.T)
+    Y_recons_out_of_sample = (torch.tensor(train_transformer.inverse_transform(Y_out_of_sample_indep_comp_qinv_pred))
+                              .type(torch_dtype))
+
+    out_of_sample_mean = torch.mean(Y_recons_out_of_sample, dim=0)
+    out_of_sample_cov = torch.cov(Y_recons_out_of_sample.T)
+    wd_recons_out_of_sample = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=out_of_sample_mean,
+                                                                 C1=target_dist.covariance_matrix, C2=out_of_sample_cov)
+
+    mvn_hz_out_of_sample_recons = pg.multivariate_normality(X=Y_recons_out_of_sample.detach().numpy())
+    train_summary['out_of_sample'] = dict()
+    train_summary['out_of_sample']['wd_reconstruct_out_of_sample'] = wd_recons_out_of_sample
+    train_summary['out_of_sample']['wd_benchmark_out_of_sample'] = wd_out_of_sample_benchmark
+    train_summary['out_of_sample']['mvz_hz_benchmark'] = mvz_hz_out_of_sample_benchmark
+    train_summary['out_of_sample']['mvz_hz_recons'] = mvn_hz_out_of_sample_recons
     print(f'train-summary:\n {train_summary}')
 
 """

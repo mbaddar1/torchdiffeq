@@ -33,8 +33,8 @@ if __name__ == '__main__':
     D = 4
     # N = 10000
     batch_size = 8192
-    niter = 500  # ?? seems to be good enough for good wd_reconstruct vs baseline and to pass mvn hz test
-    p_step = 1e-4
+    niter = 3000  # ?? seems to be good enough for good wd_reconstruct vs baseline and to pass mvn hz test
+    p_step = 1e-3
     model_classes = ['nn', 'tt']
     model_class = 'nn'
     torch_dtype = torch.float64
@@ -109,7 +109,7 @@ if __name__ == '__main__':
     print(f'Start Training')
     if model_class == 'nn':
         learning_rate = 0.1
-        model = Reg(in_dim=D, out_dim=D, hidden_dim=50, bias=True, model_type='linear',
+        model = Reg(in_dim=D, out_dim=D, hidden_dim=50, bias=True, model_type='nonlinear',
                     torch_device=torch.device('cpu'), torch_dtype=torch_dtype)
         print(f'model = {model}')
         optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)

@@ -1,5 +1,5 @@
 import logging
-from typing import List
+from typing import List, Union
 
 import numpy as np
 import random
@@ -67,7 +67,8 @@ def check_wd(wd: float, wd_thresh: float):
 
 
 def validate_qq_model(base_dist: torch.distributions.Distribution,
-                      target_dist: torch.distributions.Distribution, model: torch.nn.Module, N: int,
+                      target_dist: torch.distributions.Distribution,
+                      model: Union[torch.nn.Module, List[Extended_TensorTrain]], N: int,
                       p_levels: torch.Tensor, p_step: float, train_transformer: IncrementalPCA, repeats: int, D: int,
                       torch_dtype: torch.dtype, torch_device: torch.device) -> dict:
     mses_qq = []
@@ -85,8 +86,12 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         Y_test_ic = torch.tensor(IncrementalPCA(whiten=train_transformer.whiten).fit_transform(Y_test.detach().numpy()),
                                  dtype=torch_dtype, device=torch_device)
         Yq_comp_test_ref = torch.quantile(input=Y_test_ic, dim=0, q=p_levels.type(Y_test_ic.dtype))
-        Yq_pred = model(Xq_test)
-
+        if isinstance(model, torch.nn.Module):
+            Yq_pred = model(Xq_test)
+        elif isinstance(model, list) and all([isinstance(model[i], Extended_TensorTrain)]):
+            Yq_pred = ETT_fits_predict(ETT_fits=model, x=Xq_test, domain_stripe=[-1, 1])
+        else:
+            raise ValueError(f'Unsupported model type')
         mse = MSELoss()(Yq_comp_test_ref, Yq_pred).item()
         mses_qq.append(mse)
         # cdf validation
@@ -191,7 +196,7 @@ def wasserstein_distance_two_gaussians(m1: torch.Tensor, m2: torch.Tensor, C1: t
 
 
 def run_tt_als(x: torch.Tensor, y: torch.Tensor, ETT_fits: List[Extended_TensorTrain], test_ratio: float,
-               tol: float, domain_stripe: List[float]) -> None:
+               tol: float, domain_stripe: List[float], max_iter: int) -> None:
     """
 
     :param ETT_fits:
@@ -231,12 +236,12 @@ def run_tt_als(x: torch.Tensor, y: torch.Tensor, ETT_fits: List[Extended_TensorT
         y_d = y[:, j].view(-1, 1)
         # ALS parameters
         reg_coeff = 1e-2
-        iterations = 4
+
         rule = None
         # rule = tt.Dörfler_Adaptivity(delta = 1e-6,  maxranks = [32]*(n-1), dims = [feature_dim]*n, rankincr = 1)
         ETT_fits[j].fit(x=x_aug_domain_adjusted.type(torch.float64)[:N, :],
                         y=y_d.type(torch.float64)[:N, :],
-                        iterations=iterations, rule=rule, tol=tol,
+                        iterations=max_iter, rule=rule, tol=tol,
                         verboselevel=1, reg_param=reg_coeff)
     #     ETT_fits[j].tt.set_core(Dx - 1)
     #     # train_error = (torch.norm(ETT_fits[j](x_domain_adjusted.type(torch.float64)[:N_train, :]) -

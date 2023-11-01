@@ -25,10 +25,10 @@ from OT.utils import wasserstein_distance_two_gaussians, get_ETTs, run_tt_als, E
 # https://www.residentmar.io/2016/07/08/randomly-popular.html
 # Working seed values
 # 0, 42, 1234
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
+# SEED = 42
+# random.seed(SEED)
+# np.random.seed(SEED)
+# torch.manual_seed(SEED)
 
 """
 Flexible Generic Distributions 
@@ -42,15 +42,15 @@ if __name__ == '__main__':
     # N = 10000
     batch_size = 32000
     validation_sample_size = batch_size
-    n_data_iter = 4
-    p_step = 5e-4
+    n_data_iter = 1
+    p_step = 1e-4
     torch_dtype = torch.float64
     torch_device = torch.device('cpu')
     p_levels = torch.tensor(list(np.arange(0, 1 + p_step, p_step)), dtype=torch_dtype, device=torch_device)
     base_dist = torch.distributions.MultivariateNormal(
         loc=torch.distributions.Uniform(-0.05, 0.05).sample(torch.Size([D])).type(torch_dtype).to(torch_device),
         covariance_matrix=torch.diag(
-            torch.distributions.Uniform(0.1, 0.9).sample(torch.Size([D])).type(torch_dtype).to(torch_device)))
+            torch.distributions.Uniform(0.1, 0.5).sample(torch.Size([D])).type(torch_dtype).to(torch_device)))
     target_dist_mean = torch.distributions.Uniform(-10, 10).sample(torch.Size([D])).type(torch_dtype).to(torch_device)
     A = torch.distributions.Uniform(-5.0, 5.0).sample(torch.Size([D, D])).type(torch_dtype).to(torch_device)
     target_dist_cov = torch.matmul(A, A.T)
@@ -82,18 +82,18 @@ if __name__ == '__main__':
     Yq_all = torch.cat(tensors=Yq_list, dim=0)
     Xq_all_domain_adjusted = domain_adjust(x=Xq_all, domain_stripe=[-1, 1])
     N = Xq_all.size()[0]
-    N_train = N - len(p_levels)
+    N_train = N # N - len(p_levels)
     train_index = torch.range(0, N_train - 1).type(torch.int32)
-    test_index = torch.range(N_train, N - 1).type(torch.int32)
+    #test_index = torch.range(N_train, N - 1).type(torch.int32)
 
     Xq_train = torch.index_select(input=Xq_all, index=train_index, dim=0)
     Yq_train = torch.index_select(input=Yq_all, index=train_index, dim=0)
-    Xq_test = torch.index_select(input=Xq_all, index=test_index, dim=0)
-    Yq_test = torch.index_select(input=Yq_all, index=test_index, dim=0)
+    Xq_test = torch.index_select(input=Xq_all, index=train_index, dim=0)
+    Yq_test = torch.index_select(input=Yq_all, index=train_index, dim=0)
 
-    model = get_ETTs(D_in=D + 1, D_out=D, rank=8, domain_stripe=[-1, 1], poly_degree=4, device=torch_device)
+    model = get_ETTs(D_in=D + 1, D_out=D, rank=3, domain_stripe=[-1, 1], poly_degree=6, device=torch_device)
     run_tt_als(x=Xq_train, y=Yq_train, ETT_fits=model, test_ratio=0.2, tol=1e-6, domain_stripe=[-1, 1],
-               max_iter=50, regularization_coeff=float(1000))
+               max_iter=60, regularization_coeff=float(1000))
 
     Yq_pred_in_sample = ETT_fits_predict(x=Xq_train, ETT_fits=model, domain_stripe=[-1, 1])
     mse_loss_in_sample = MSELoss()(Yq_train, Yq_pred_in_sample)

@@ -131,8 +131,8 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
             mvn_hz_test_res_list.append({'baseline': mvn_hz_baseline, 'reconstruct': mvn_hz_recons})
 
     res = dict()
-    res['ica_qq_mses'] = mses_qq
-    res['cdf_mses'] = mse_cdfs
+    # res['ica_qq_mses'] = mses_qq
+    # res['cdf_mses'] = mse_cdfs
     res['wd'] = wd_list
     res['mvn_hz'] = mvn_hz_test_res_list
     return res

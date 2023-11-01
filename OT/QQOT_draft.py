@@ -1,3 +1,4 @@
+import datetime
 import json
 import random
 import sys
@@ -18,13 +19,20 @@ from OT.models import Reg
 from OT.utils import wasserstein_distance_two_gaussians, get_ETTs, run_tt_als, ETT_fits_predict, uv_sample, \
     validate_qq_model
 
-SEED = 41
+# Common Seeds
+# https://www.kaggle.com/code/residentmario/kernel16e284dcb7
+# https://blog.semicolonsoftware.de/the-most-popular-random-seeds/
+# https://www.residentmar.io/2016/07/08/randomly-popular.html
+# Working seed values
+# 0, 42, 1234
+SEED = 42
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
-# SEEDS :
+
 """
 Flexible Generic Distributions 
+
 https://en.wikipedia.org/wiki/Metalog_distribution 
 
 """
@@ -33,8 +41,9 @@ if __name__ == '__main__':
     D = 4
     # N = 10000
     batch_size = 8192
-    niter = 3000  # ?? seems to be good enough for good wd_reconstruct vs baseline and to pass mvn hz test
-    p_step = 1e-3
+    validation_sample_size = batch_size
+    niter = 2000
+    p_step = 1e-4
     model_classes = ['nn', 'tt']
     model_class = 'nn'
     torch_dtype = torch.float64
@@ -50,6 +59,9 @@ if __name__ == '__main__':
     target_dist_cov = torch.matmul(A, A.T)
     # target_dist_cov = torch.diag(torch.distributions.Uniform(0.9, 5).sample(torch.Size([D])))
     target_dist = torch.distributions.MultivariateNormal(loc=target_dist_mean, covariance_matrix=target_dist_cov)
+    # TODO
+    # test re-construct-ability of the target dist using self-QQ-reg, PCA AND q-inv
+
     print(f'base dist  ={base_dist}, mean = {base_dist.mean}, cov = {base_dist.covariance_matrix}')
     print(f'target dist = {target_dist}, mean = {target_dist.mean}, cov = {target_dist.covariance_matrix}')
     # Original Samples
@@ -108,7 +120,7 @@ if __name__ == '__main__':
     transformer = IncrementalPCA(whiten=True)
     print(f'Start Training')
     if model_class == 'nn':
-        learning_rate = 0.1
+        learning_rate = 0.2
         model = Reg(in_dim=D, out_dim=D, hidden_dim=50, bias=True, model_type='nonlinear',
                     torch_device=torch.device('cpu'), torch_dtype=torch_dtype)
         print(f'model = {model}')
@@ -117,6 +129,8 @@ if __name__ == '__main__':
         model = get_ETTs(D_in=D, D_out=D, rank=3, domain_stripe=[-1, 1], poly_degree=3, device=torch.device("cpt"))
     losses = []
     # main training loop
+    print(f'Starting Training...')
+    start_time = datetime.datetime.now()
     for i in range(niter):
         # indices = torch.randperm(n=batch_size)
         X_batch = base_dist.sample(torch.Size([batch_size])).type(torch_dtype).to(torch_device)
@@ -125,8 +139,8 @@ if __name__ == '__main__':
         Y_batch_comp = torch.tensor(transformer.transform(Y_batch.detach().numpy()), dtype=torch_dtype,
                                     device=torch_device)
         # FIXME debug vars, to remove
-        m = torch.mean(Y_batch_comp, dim=0)
-        C = torch.cov(Y_batch_comp.T)
+        # m = torch.mean(Y_batch_comp, dim=0)
+        # C = torch.cov(Y_batch_comp.T)
         Xq_batch = torch.quantile(input=X_batch, dim=0, q=p_levels)
         # Xq_batch_aug = torch.cat([Xq_batch, u_levels.view(-1, 1)], dim=1)
         Yq_batch_comp = torch.quantile(input=Y_batch_comp, dim=0, q=p_levels)
@@ -142,16 +156,20 @@ if __name__ == '__main__':
             print(f'i = {i + 1} ,model_type = {model_class}, avg-running-loss = {np.mean(losses[-10:])}')
             loss.backward()
             optimizer.step()
-        elif model_class == 'nn':
+        elif model_class == 'tt':
             y_hat = ETT_fits_predict(x=Xq_batch, ETT_fits=model, domain_stripe=[-1, 1])
             loss = MSELoss()(Yq_batch_comp, y_hat)
             print(f'i = {i} ,model_type = {model_class}, loss = {loss}')
             run_tt_als(x=Xq_batch, y=Y_batch, ETT_fits=model, test_ratio=0.2, tol=1e-4, domain_stripe=[-1, 1])
 
+    end_time = datetime.datetime.now()
+    training_time = (end_time - start_time).seconds
+    print(f'Training time = {training_time} seconds')
     res = validate_qq_model(base_dist=base_dist, target_dist=target_dist, model=model, p_levels=p_levels,
-                            N=10000,
+                            N=validation_sample_size,
                             train_transformer=transformer, repeats=5, p_step=p_step, D=D, torch_dtype=torch_dtype,
                             torch_device=torch_device)
+
     print(f'Validation Results :\n{res}')
     # validation using out of sample data
     # print(f'In-sample validation')

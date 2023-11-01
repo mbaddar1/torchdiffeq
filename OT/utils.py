@@ -88,7 +88,7 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         Yq_comp_test_ref = torch.quantile(input=Y_test_ic, dim=0, q=p_levels.type(Y_test_ic.dtype))
         if isinstance(model, torch.nn.Module):
             Yq_pred = model(Xq_test)
-        elif isinstance(model, list) and all([isinstance(model[i], Extended_TensorTrain)]):
+        elif isinstance(model, list) and all([isinstance(model[k], Extended_TensorTrain)] for k in range(len(model))):
             Yq_pred = ETT_fits_predict(ETT_fits=model, x=Xq_test, domain_stripe=[-1, 1])
         else:
             raise ValueError(f'Unsupported model type')
@@ -196,9 +196,11 @@ def wasserstein_distance_two_gaussians(m1: torch.Tensor, m2: torch.Tensor, C1: t
 
 
 def run_tt_als(x: torch.Tensor, y: torch.Tensor, ETT_fits: List[Extended_TensorTrain], test_ratio: float,
-               tol: float, domain_stripe: List[float], max_iter: int) -> None:
+               tol: float, domain_stripe: List[float], max_iter: int, regularization_coeff: float) -> None:
     """
 
+    :param regularization_coeff:
+    :param max_iter:
     :param ETT_fits:
     :param domain_stripe:
     :param x: pure x, no time
@@ -235,14 +237,12 @@ def run_tt_als(x: torch.Tensor, y: torch.Tensor, ETT_fits: List[Extended_TensorT
     for j in range(Dy):
         y_d = y[:, j].view(-1, 1)
         # ALS parameters
-        reg_coeff = 1e-2
-
         rule = None
-        # rule = tt.Dörfler_Adaptivity(delta = 1e-6,  maxranks = [32]*(n-1), dims = [feature_dim]*n, rankincr = 1)
+        print(f'*** Running TT-ALS for d = {j} ***')
         ETT_fits[j].fit(x=x_aug_domain_adjusted.type(torch.float64)[:N, :],
                         y=y_d.type(torch.float64)[:N, :],
                         iterations=max_iter, rule=rule, tol=tol,
-                        verboselevel=1, reg_param=reg_coeff)
+                        verboselevel=1, reg_param=regularization_coeff)
     #     ETT_fits[j].tt.set_core(Dx - 1)
     #     # train_error = (torch.norm(ETT_fits[j](x_domain_adjusted.type(torch.float64)[:N_train, :]) -
     #     #                           y_d.type(torch.float64)[:N_train, :]) ** 2 / torch.norm(
@@ -350,11 +350,12 @@ def ETT_fits_predict(ETT_fits: List[Extended_TensorTrain], x: torch.Tensor,
 
     x_domain_adjusted = domain_adjust(x=x, domain_stripe=domain_stripe)
     assert is_domain_adjusted(x=x_domain_adjusted, domain_stripe=domain_stripe)
-    assert len(ETT_fits) == Dx
+    for d, ETT in enumerate(ETT_fits):
+        assert ETT.d == Dx
 
     yd_hat_list = []
 
-    for d in range(Dx):
+    for d in range(len(ETT_fits)):
         assert len(ETT_fits[d].tt.dims) == Dx, (f"ETT order (num of degrees)  must = Dz_aug : "
                                                 f"{len(ETT_fits[d].tt.dims)} != {Dx}")
         ETT_fits[d].tt.set_core(Dx - 1)

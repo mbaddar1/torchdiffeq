@@ -42,8 +42,8 @@ if __name__ == '__main__':
     # N = 10000
     batch_size = 32000
     validation_sample_size = batch_size
-    n_data_iter = 5
-    p_step = 1e-3
+    n_data_iter = 4
+    p_step = 5e-4
     torch_dtype = torch.float64
     torch_device = torch.device('cpu')
     p_levels = torch.tensor(list(np.arange(0, 1 + p_step, p_step)), dtype=torch_dtype, device=torch_device)
@@ -91,9 +91,9 @@ if __name__ == '__main__':
     Xq_test = torch.index_select(input=Xq_all, index=test_index, dim=0)
     Yq_test = torch.index_select(input=Yq_all, index=test_index, dim=0)
 
-    model = get_ETTs(D_in=D+1, D_out=D, rank=3, domain_stripe=[-1, 1], poly_degree=3, device=torch_device)
+    model = get_ETTs(D_in=D + 1, D_out=D, rank=8, domain_stripe=[-1, 1], poly_degree=4, device=torch_device)
     run_tt_als(x=Xq_train, y=Yq_train, ETT_fits=model, test_ratio=0.2, tol=1e-6, domain_stripe=[-1, 1],
-               max_iter=50, regularization_coeff=float(100))
+               max_iter=50, regularization_coeff=float(1000))
 
     Yq_pred_in_sample = ETT_fits_predict(x=Xq_train, ETT_fits=model, domain_stripe=[-1, 1])
     mse_loss_in_sample = MSELoss()(Yq_train, Yq_pred_in_sample)
@@ -102,9 +102,15 @@ if __name__ == '__main__':
     Yq_test_out_of_sample = ETT_fits_predict(x=Xq_test, ETT_fits=model, domain_stripe=[-1, 1])
     mse_loss_out_of_sample = MSELoss()(Yq_test, Yq_test_out_of_sample)
     print(f'MSE QQ one-batch out of-sample = {mse_loss_out_of_sample}')
-    # res = validate_qq_model(base_dist=base_dist, target_dist=target_dist, model=model, p_levels=p_levels,
-    #                         N=validation_sample_size,
-    #                         train_transformer=transformer, repeats=5, p_step=p_step, D=D, torch_dtype=torch_dtype,
-    #                         torch_device=torch_device)
-    # print(f'validation results:\n{res}')
+    Y_comp_qinv_sample = torch.stack([
+        uv_sample(Yq=Yq_test_out_of_sample[:, i].reshape(-1), N=4096, u_levels=p_levels, u_step=p_step, interp='cubic')
+        for i in range(D)]).T.type(torch_dtype).to(torch_device)
+    Y_recons = torch.tensor(transformer.inverse_transform(Y_comp_qinv_sample.detach().numpy()))
+    mean_Y_recons = torch.mean(Y_recons, dim=0)
+    cov_Y_recons = torch.cov(Y_recons.T)
+    wd = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=mean_Y_recons, C1=target_dist.covariance_matrix,
+                                            C2=cov_Y_recons)
+    mvn_hz_test = pg.multivariate_normality(X=Y_recons.detach().numpy())
+    print(f'wd = {wd}')
+    print(f'mvn_hz_test = {mvn_hz_test}')
     print('finished')

@@ -224,22 +224,22 @@ def run_tt_als(x: torch.Tensor, y: torch.Tensor, ETT_fits: List[Extended_TensorT
     # order = len(degrees)  # not used, but for debugging only
     # domain = [domain_stripe for _ in range(Dx_aug)]
     # op = orthopoly(degrees, domain, device=x_device)
-    x_aug_domain_adjusted = domain_adjust(x=x, domain_stripe=domain_stripe)
-    is_domain_adjusted(x=x_aug_domain_adjusted, domain_stripe=domain_stripe)
+    x_domain_adjusted = domain_adjust(x=x, domain_stripe=domain_stripe)
+    is_domain_adjusted(x=x_domain_adjusted, domain_stripe=domain_stripe)
     assert len(ETT_fits) == Dy, "len(ETT_fits) must be equal to Dy"
     for i, ETT_fit in enumerate(ETT_fits):
         assert isinstance(ETT_fit, Extended_TensorTrain), (f"ETT_fit {i} must be of type "
                                                            f"{Extended_TensorTrain.__class__.__name__},"
                                                            f"found {type(ETT_fit)} ")
     # ETT_fits = [Extended_TensorTrain(op, ranks, device=x_device) for _ in range(Dy)]
-    y_predicted_list = []
+    # y_predicted_list = []
 
     for j in range(Dy):
         y_d = y[:, j].view(-1, 1)
         # ALS parameters
         rule = None
         print(f'*** Running TT-ALS for d = {j} ***')
-        ETT_fits[j].fit(x=x_aug_domain_adjusted.type(torch.float64)[:N, :],
+        ETT_fits[j].fit(x=x_domain_adjusted.type(torch.float64)[:N, :],
                         y=y_d.type(torch.float64)[:N, :],
                         iterations=max_iter, rule=rule, tol=tol,
                         verboselevel=1, reg_param=regularization_coeff)

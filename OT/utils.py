@@ -1,5 +1,5 @@
 import logging
-from typing import List, Union
+from typing import List, Union, Iterable
 
 import numpy as np
 import random
@@ -13,6 +13,25 @@ from torch.nn import MSELoss
 import pingouin as pg
 from GMSOC.functional_tt_fabrique import orthpoly, Extended_TensorTrain
 from OT.sqrtm import sqrtm
+from scipy.stats import norm
+
+
+def get_base_dist_quantiles(p_levels: torch.Tensor, base_dist: torch.distributions.Distribution,
+                            torch_dtype: torch.dtype, torch_device: torch.device) -> torch.Tensor:
+    if isinstance(base_dist, torch.distributions.MultivariateNormal):
+        D = base_dist.mean.size()[0]
+        diag_cov = torch.diagonal(base_dist.covariance_matrix)
+        # assert cov matrix is diagonal
+        tmp_cov = torch.diag(diag_cov)
+        err = torch.linalg.norm(tmp_cov - base_dist.covariance_matrix)
+        assert err <= 1e-6, "base dist cov is not diagonal"
+        quantiles = torch.stack(
+            [torch.tensor(norm.ppf(q=p_levels.detach().numpy(), loc=base_dist.mean[d].item(), scale=diag_cov[d].item()))
+             for d
+             in range(D)], dim=1).type(torch_dtype).to(torch_device)
+        return quantiles
+    else:
+        raise ValueError(f'Unsupported base-dist = {type(base_dist)}')
 
 
 def uv_sample(Yq: torch.Tensor, N: int, u_levels: torch.Tensor, u_step: float, interp: str) -> torch.Tensor:
@@ -36,7 +55,7 @@ def uv_sample(Yq: torch.Tensor, N: int, u_levels: torch.Tensor, u_step: float, i
     assert (len(u_levels.size()) == 1), "u_levels must be of dim 1"
     assert u_levels_size[0] == Yq_size[0], "Yq must have same 1-dim size as u_levels"
     assert np.abs(u_levels[0] - 0) <= eps, "u_levels[0] must be 0"
-    assert np.abs(u_levels[-1] - 1) <= eps, "u_levels[-1] must be 1"
+    assert 0.99 <= u_levels[-1] < 1, "u_levels[-1] must be >= 0.99 and < 1"
     assert np.abs(u_step - 1.0 / (u_levels_size[0] - 1)) <= eps, "u_levels size must compatible with u_step"
     #
     u_sample = torch.distributions.Uniform(0, 1).sample(torch.Size([N]))

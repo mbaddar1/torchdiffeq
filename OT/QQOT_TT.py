@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 
 from OT.models import Reg
 from OT.utils import wasserstein_distance_two_gaussians, get_ETTs, run_tt_als, ETT_fits_predict, uv_sample, \
-    validate_qq_model, domain_adjust
+    validate_qq_model, domain_adjust, get_base_dist_quantiles
 
 # Common Seeds
 # https://www.kaggle.com/code/residentmario/kernel16e284dcb7
@@ -25,10 +25,10 @@ from OT.utils import wasserstein_distance_two_gaussians, get_ETTs, run_tt_als, E
 # https://www.residentmar.io/2016/07/08/randomly-popular.html
 # Working seed values
 # SEEDS to test : 0, 1, 10, 42, 123, 1234, 12345
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
+# SEED = 42
+# random.seed(SEED)
+# np.random.seed(SEED)
+# torch.manual_seed(SEED)
 
 """
 Flexible Generic Distributions 
@@ -40,10 +40,15 @@ https://en.wikipedia.org/wiki/Metalog_distribution
 if __name__ == '__main__':
     D = 4
     X_sample_size = Y_sample_size = 32768
-    p_step = 5e-5
+    p_step = 1e-4
+    eps = 1e-8
+    assert eps < p_step
     torch_dtype = torch.float64
     torch_device = torch.device('cpu')
-    p_levels = torch.tensor(list(np.arange(0, 1 + p_step, p_step)), dtype=torch_dtype, device=torch_device)
+    lowest_p_val = eps
+    highest_p_val = 1.0
+    p_levels_train = torch.tensor(list(np.arange(lowest_p_val, highest_p_val + eps, p_step)), dtype=torch_dtype,
+                                  device=torch_device)
     base_dist = torch.distributions.MultivariateNormal(
         loc=torch.distributions.Uniform(-0.05, 0.05).sample(torch.Size([D])).type(torch_dtype).to(torch_device),
         covariance_matrix=torch.diag(
@@ -61,16 +66,18 @@ if __name__ == '__main__':
     Xq_list = []
     Yq_list = []
     X_sample = base_dist.sample(torch.Size([X_sample_size]))
-    Xq = torch.quantile(input=X_sample, q=p_levels, dim=0)
+    Xq = get_base_dist_quantiles(p_levels=p_levels_train, base_dist=base_dist, torch_dtype=torch_dtype,
+                                 torch_device=torch_device)
+    # Xq = torch.quantile(input=X_sample, q=p_levels, dim=0)
     Y_sample = target_dist.sample(torch.Size([Y_sample_size]))
     Y_comp = torch.tensor(transformer.fit_transform(Y_sample.detach().numpy()), dtype=torch_dtype, device=torch_device)
-    Yq_comp = torch.quantile(input=Y_comp, dim=0, q=p_levels)
-    model = get_ETTs(D_in=D, D_out=D, rank=3, domain_stripe=[-1, 1], poly_degree=6, device=torch_device)
+    Yq_comp = torch.quantile(input=Y_comp, dim=0, q=p_levels_train)
+    model = get_ETTs(D_in=D, D_out=D, rank=3, domain_stripe=[-1, 1], poly_degree=4, device=torch_device)
     start_time = datetime.datetime.now()
     run_tt_als(x=Xq, y=Yq_comp, ETT_fits=model, test_ratio=0.2, tol=1e-6, domain_stripe=[-1, 1],
-               max_iter=50, regularization_coeff=float(1e-1))
+               max_iter=100, regularization_coeff=float(1e1))
     end_time = datetime.datetime.now()
-    training_time = (end_time-start_time).seconds
+    training_time = (end_time - start_time).seconds
     print(f'Training time = {training_time} secs')
     # in sample test
 
@@ -81,36 +88,38 @@ if __name__ == '__main__':
     # out of sample test (1)
     Y_sample_1 = target_dist.sample(torch.Size([Y_sample_size]))
     Y_sample_1_comp = torch.tensor(PCA(whiten=True).fit_transform(Y_sample_1)).type(torch_dtype).to(torch_device)
-    Yq_sample_1_comp = torch.quantile(Y_sample_1_comp, dim=0, q=p_levels)
+    Yq_sample_1_comp = torch.quantile(Y_sample_1_comp, dim=0, q=p_levels_train)
     mse_out_of_sample_1 = MSELoss()(Yq_comp_pred, Yq_sample_1_comp)
     print(f'QQ mse out of sample 1 = {mse_out_of_sample_1}')
 
     # out of sample (2)
-    X_sample_2 = base_dist.sample(torch.Size([X_sample_size]))
-    Xq_2 = torch.quantile(X_sample_2, dim=0, q=p_levels)
-    Y_sample_2 = target_dist.sample(torch.Size([Y_sample_size]))
-    Y_sample_2_comp = torch.tensor(PCA(whiten=True).fit_transform(Y_sample_2)).type(torch_dtype).to(torch_device)
-    Yq_sample_2_comp = torch.quantile(Y_sample_2_comp, dim=0, q=p_levels)
-    Yq_pred_2 = ETT_fits_predict(ETT_fits=model, x=Xq_2, domain_stripe=[-1, 1])
-    mse_out_of_sample_2 = MSELoss()(Yq_pred_2, Yq_sample_2_comp)
-    print(f'QQ mse out of sample 2 = {mse_out_of_sample_2}')
+    # TODO , might revisit ??
+    # X_sample_2 = base_dist.sample(torch.Size([X_sample_size]))
+    # Xq_2 = torch.quantile(X_sample_2, dim=0, q=p_levels_train)
+    # Y_sample_2 = target_dist.sample(torch.Size([Y_sample_size]))
+    # Y_sample_2_comp = torch.tensor(PCA(whiten=True).fit_transform(Y_sample_2)).type(torch_dtype).to(torch_device)
+    # Yq_sample_2_comp = torch.quantile(Y_sample_2_comp, dim=0, q=p_levels_train)
+    # Yq_pred_2 = ETT_fits_predict(ETT_fits=model, x=Xq_2, domain_stripe=[-1, 1])
+    # mse_out_of_sample_2 = MSELoss()(Yq_pred_2, Yq_sample_2_comp)
+    # print(f'QQ mse out of sample 2 = {mse_out_of_sample_2}')
 
     # reconstruction test
     test_sample_size = 4096
     Y_sample_3 = target_dist.sample(torch.Size([test_sample_size]))
-    mean_benchmark = torch.mean(Y_sample_3,dim=0)
+    mean_benchmark = torch.mean(Y_sample_3, dim=0)
     cov_benchmark = torch.cov(Y_sample_3.T)
     Y_comp_qinv_sample = torch.stack([
-        uv_sample(Yq=Yq_comp_pred[:, d].reshape(-1), N=test_sample_size, u_levels=p_levels, u_step=p_step, interp='cubic')
+        uv_sample(Yq=Yq_comp_pred[:, d].reshape(-1), N=test_sample_size, u_levels=p_levels_train, u_step=p_step,
+                  interp='cubic')
         for d in range(D)]).T.type(torch_dtype).to(torch_device)
     Y_recons = torch.tensor(transformer.inverse_transform(Y_comp_qinv_sample.detach().numpy())).type(
         torch_dtype).to(torch_device)
     mean_recons = torch.mean(Y_recons, dim=0)
     cov_recons = torch.cov(Y_recons.T)
-    wd_benchmark = wasserstein_distance_two_gaussians(m1=target_dist.mean,m2=mean_benchmark,
-                                                      C1=target_dist.covariance_matrix,C2=cov_benchmark)
+    wd_benchmark = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=mean_benchmark,
+                                                      C1=target_dist.covariance_matrix, C2=cov_benchmark)
     wd_test = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=mean_recons, C1=target_dist.covariance_matrix,
-                                            C2=cov_recons)
+                                                 C2=cov_recons)
     mvn_hz_benchmark = pg.multivariate_normality(Y_sample_3.detach().numpy())
     mvn_hz_test = pg.multivariate_normality(Y_recons.detach().numpy())
     print(f'wd test = {wd_test}')

@@ -86,9 +86,13 @@ if __name__ == '__main__':
     print(f'QQ mse in sample = {mse_in_sample}')
 
     # out of sample test (1)
+    p_levels_test = p_levels_train + p_step / 2
+    Xq2 = get_base_dist_quantiles(p_levels=p_levels_test, base_dist=base_dist, torch_dtype=torch_dtype,
+                                  torch_device=torch_device)
+
     Y_sample_1 = target_dist.sample(torch.Size([Y_sample_size]))
     Y_sample_1_comp = torch.tensor(PCA(whiten=True).fit_transform(Y_sample_1)).type(torch_dtype).to(torch_device)
-    Yq_sample_1_comp = torch.quantile(Y_sample_1_comp, dim=0, q=p_levels_train)
+    Yq_sample_1_comp = torch.quantile(Y_sample_1_comp, dim=0, q=p_levels_test)
     mse_out_of_sample_1 = MSELoss()(Yq_comp_pred, Yq_sample_1_comp)
     print(f'QQ mse out of sample 1 = {mse_out_of_sample_1}')
 

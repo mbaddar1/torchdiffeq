@@ -66,8 +66,12 @@ if __name__ == '__main__':
     Y_comp = torch.tensor(transformer.fit_transform(Y_sample.detach().numpy()), dtype=torch_dtype, device=torch_device)
     Yq_comp = torch.quantile(input=Y_comp, dim=0, q=p_levels)
     model = get_ETTs(D_in=D, D_out=D, rank=3, domain_stripe=[-1, 1], poly_degree=6, device=torch_device)
+    start_time = datetime.datetime.now()
     run_tt_als(x=Xq, y=Yq_comp, ETT_fits=model, test_ratio=0.2, tol=1e-6, domain_stripe=[-1, 1],
-               max_iter=50, regularization_coeff=float(1e1))
+               max_iter=50, regularization_coeff=float(1e-1))
+    end_time = datetime.datetime.now()
+    training_time = (end_time-start_time).seconds
+    print(f'Training time = {training_time} secs')
     # in sample test
 
     Yq_comp_pred = ETT_fits_predict(ETT_fits=model, x=Xq, domain_stripe=[-1, 1])

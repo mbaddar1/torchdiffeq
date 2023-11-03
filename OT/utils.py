@@ -16,9 +16,9 @@ from OT.sqrtm import sqrtm
 from scipy.stats import norm
 
 
-def get_data_pair(base_dist: torch.distributions.Distribution, target_dist: torch.distributions.Distribution,
-                  data_batch_size: int, num_batches: int, num_p_levels: int, torch_dtype: torch.dtype,
-                  torch_device: torch.device, transformer: IncrementalPCA) -> Tuple[torch.Tensor, torch.Tensor]:
+def get_train_data(base_dist: torch.distributions.Distribution, target_dist: torch.distributions.Distribution,
+                   data_batch_size: int, num_batches: int, num_p_levels: int, torch_dtype: torch.dtype,
+                   torch_device: torch.device, transformer: IncrementalPCA) -> Tuple[torch.Tensor, torch.Tensor]:
     eps = 1e-6
     Xq_list = []
     Yq_list = []
@@ -36,6 +36,21 @@ def get_data_pair(base_dist: torch.distributions.Distribution, target_dist: torc
     Xq_all = torch.cat(Xq_list, dim=0)
     Yq_all = torch.cat(Yq_list, dim=0)
     return Xq_all, Yq_all
+
+
+def get_test_data(base_dist: torch.distributions.Distribution, target_dist: torch.distributions.Distribution,
+                  data_size: int, num_p_levels: int, torch_dtype: torch.dtype,
+                  torch_device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+    eps = 1e-6
+    test_transformer = PCA(whiten=True)
+    Y = base_dist.sample(torch.Size([data_size]))
+    p_levels, _ = torch.sort(torch.distributions.Uniform(eps, 1 - eps).sample(torch.Size([num_p_levels])))
+    Xq = get_base_dist_quantiles(p_levels=p_levels, base_dist=base_dist, torch_dtype=torch_dtype,
+                                 torch_device=torch_device)
+    Xq = torch.cat([Xq, p_levels.view(-1, 1)],dim=1).type(torch_dtype).to(torch_device)
+    Y_comp = torch.tensor(test_transformer.fit_transform(Y)).type(torch_dtype).to(torch_device)
+    Y_comp_q = torch.quantile(input=Y_comp, q=p_levels, dim=0).type(torch_dtype).to(torch_device)
+    return Xq, Y_comp_q
 
 
 def get_base_dist_quantiles(p_levels: torch.Tensor, base_dist: torch.distributions.Distribution,
@@ -238,9 +253,11 @@ def wasserstein_distance_two_gaussians(m1: torch.Tensor, m2: torch.Tensor, C1: t
 
 
 def run_tt_als(x: torch.Tensor, y: torch.Tensor, ETT_fits: List[Extended_TensorTrain], test_ratio: float,
-               tol: float, domain_stripe: List[float], max_iter: int, regularization_coeff: float) -> None:
+               tol: float, domain_stripe: List[float], max_iter: int, regularization_coeff: float,
+               adjust_domain_flag: bool) -> None:
     """
 
+    :param adjust_domain_flag:
     :param regularization_coeff:
     :param max_iter:
     :param ETT_fits:
@@ -252,21 +269,9 @@ def run_tt_als(x: torch.Tensor, y: torch.Tensor, ETT_fits: List[Extended_TensorT
     :param tol:
     :return:
     """
-    logger = logging.getLogger()
     N = x.shape[0]
-    # N_test = int(test_ratio * N)
-    # N_train = N - N_test
-    # x_device = x.get_device() if x.is_cuda else torch.device('cpu')
-    # x_aug = torch.cat(tensors=[x, torch.tensor([t]).repeat(N, 1).to(x_device)], dim=1)
-    Dx = x.shape[1]
     Dy = y.shape[1]
-    #
-    # degrees = [poly_degree] * Dx_aug
-    # ranks = [1] + [rank] * (Dx_aug - 1) + [1]
-    # order = len(degrees)  # not used, but for debugging only
-    # domain = [domain_stripe for _ in range(Dx_aug)]
-    # op = orthopoly(degrees, domain, device=x_device)
-    x_domain_adjusted = x  # domain_adjust(x=x, domain_stripe=domain_stripe)
+    x_domain_adjusted = domain_adjust(x=x, domain_stripe=domain_stripe) if adjust_domain_flag else x  #
     is_domain_adjusted(x=x_domain_adjusted, domain_stripe=domain_stripe)
     assert len(ETT_fits) == Dy, "len(ETT_fits) must be equal to Dy"
     for i, ETT_fit in enumerate(ETT_fits):
@@ -382,21 +387,12 @@ def get_ETTs(D_in: int, D_out: int, rank: int, domain_stripe: List[float], poly_
 
 
 def ETT_fits_predict(ETT_fits: List[Extended_TensorTrain], x: torch.Tensor,
-                     domain_stripe: List[float]) -> torch.Tensor:
-    # N = x.size()[0]
+                     domain_stripe: List[float], adjust_domain_flag: bool) -> torch.Tensor:
     Dx = x.size()[1]
-    # if x.is_cuda:
-    #     x_device = x.get_device()
-    # else:
-    #     x_device = torch.device('cpu')
-
-    x_domain_adjusted = x  # domain_adjust(x=x, domain_stripe=domain_stripe)
-    # assert is_domain_adjusted(x=x_domain_adjusted, domain_stripe=domain_stripe)
+    x_domain_adjusted = domain_adjust(x=x, domain_stripe=domain_stripe) if adjust_domain_flag else x
     for d, ETT in enumerate(ETT_fits):
         assert ETT.d == Dx
-
     yd_hat_list = []
-
     for d in range(len(ETT_fits)):
         assert len(ETT_fits[d].tt.dims) == Dx, (f"ETT order (num of degrees)  must = Dz_aug : "
                                                 f"{len(ETT_fits[d].tt.dims)} != {Dx}")

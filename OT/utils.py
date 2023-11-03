@@ -1,5 +1,5 @@
 import logging
-from typing import List, Union, Iterable
+from typing import List, Union, Iterable, Tuple
 
 import numpy as np
 import random
@@ -14,6 +14,28 @@ import pingouin as pg
 from GMSOC.functional_tt_fabrique import orthpoly, Extended_TensorTrain
 from OT.sqrtm import sqrtm
 from scipy.stats import norm
+
+
+def get_data_pair(base_dist: torch.distributions.Distribution, target_dist: torch.distributions.Distribution,
+                  data_batch_size: int, num_batches: int, num_p_levels: int, torch_dtype: torch.dtype,
+                  torch_device: torch.device, transformer: IncrementalPCA) -> Tuple[torch.Tensor, torch.Tensor]:
+    eps = 1e-6
+    Xq_list = []
+    Yq_list = []
+    for i in range(num_batches):
+        p_levels, _ = torch.sort(torch.distributions.Uniform(eps, 1 - eps).sample(torch.Size([num_p_levels])))
+        Y_batch = target_dist.sample(torch.Size([data_batch_size]))
+        transformer.partial_fit(Y_batch)
+        Y_comp_batch = torch.tensor(transformer.transform(Y_batch))
+        Yq_batch = torch.quantile(input=Y_comp_batch, dim=0, q=p_levels)
+        Xq_batch = get_base_dist_quantiles(p_levels=p_levels, base_dist=base_dist, torch_dtype=torch_dtype,
+                                           torch_device=torch_device)
+        Xq_batch = torch.cat([Xq_batch, p_levels.view(-1, 1)], dim=1)
+        Xq_list.append(Xq_batch)
+        Yq_list.append(Yq_batch)
+    Xq_all = torch.cat(Xq_list, dim=0)
+    Yq_all = torch.cat(Yq_list, dim=0)
+    return Xq_all, Yq_all
 
 
 def get_base_dist_quantiles(p_levels: torch.Tensor, base_dist: torch.distributions.Distribution,
@@ -34,12 +56,12 @@ def get_base_dist_quantiles(p_levels: torch.Tensor, base_dist: torch.distributio
         raise ValueError(f'Unsupported base-dist = {type(base_dist)}')
 
 
-def uv_sample(Yq: torch.Tensor, N: int, u_levels: torch.Tensor, u_step: float, interp: str) -> torch.Tensor:
+def uv_sample(Yq: torch.Tensor, N: int, p_levels: torch.Tensor, interp: str) -> torch.Tensor:
     """
     There is some kind of redundancy in parameters. It's intentional and try to alleviate it by some assertions
     :param interp:
-    :param u_step:
-    :param u_levels:
+    :param p_step:
+    :param p_levels:
     :param Yq:
     :param N:
     :return:
@@ -48,29 +70,30 @@ def uv_sample(Yq: torch.Tensor, N: int, u_levels: torch.Tensor, u_step: float, i
     interp_methods = ["linear", "cubic"]
     # some assertions for params
     assert interp in interp_methods, f"interp param must be one of {interp_methods}"
-    eps = 1e-6
+    # eps = 1e-6
     Yq_size = Yq.size()
     assert len(Yq_size) == 1, "Yq must be of 1 dim"
-    u_levels_size = u_levels.size()
-    assert (len(u_levels.size()) == 1), "u_levels must be of dim 1"
-    assert u_levels_size[0] == Yq_size[0], "Yq must have same 1-dim size as u_levels"
-    assert np.abs(u_levels[0] - 0) <= eps, "u_levels[0] must be 0"
-    assert 0.99 <= u_levels[-1] < 1, "u_levels[-1] must be >= 0.99 and < 1"
-    assert np.abs(u_step - 1.0 / (u_levels_size[0] - 1)) <= eps, "u_levels size must compatible with u_step"
+    p_levels_size = p_levels.size()
+    assert (len(p_levels.size()) == 1), "u_levels must be of dim 1"
+    assert p_levels_size[0] == Yq_size[0], "Yq must have same 1-dim size as u_levels"
+    assert 0 < p_levels[0] <= 0.01, "min(p_levels) must be > 0 and <=0.01"
+    assert 0.99 <= p_levels[-1] < 1, "max(p_levels) must be >= 0.99 and < 1"
+    # assert np.abs(p_step - 1.0 / (p_levels_size[0] - 1)) <= eps, "u_levels size must compatible with u_step"
     #
     u_sample = torch.distributions.Uniform(0, 1).sample(torch.Size([N]))
     Y_sample = None
-    if interp == 'linear':
-        idx_low = torch.floor(u_sample / u_step).type(torch.int)
-        idx_high = idx_low + 1
-        u_low = u_levels[idx_low]
-        u_high = u_levels[idx_high]
-        Yq_low = Yq[idx_low]
-        Yq_high = Yq[idx_high]
-        m = (u_sample - u_low) / (u_high - u_low)
-        Y_sample = torch.mul(m, Yq_high - Yq_low) + Yq_low
-    elif interp == 'cubic':
-        cs = CubicSpline(x=u_levels.detach().numpy(), y=Yq.detach().numpy())
+    # if interp == 'linear':
+    #     raise ValueError("linear interpolation is not supported")
+    #     idx_low = torch.floor(u_sample / p_step).type(torch.int)
+    #     idx_high = idx_low + 1
+    #     u_low = p_levels[idx_low]
+    #     u_high = p_levels[idx_high]
+    #     Yq_low = Yq[idx_low]
+    #     Yq_high = Yq[idx_high]
+    #     m = (u_sample - u_low) / (u_high - u_low)
+    #     Y_sample = torch.mul(m, Yq_high - Yq_low) + Yq_low
+    if interp == 'cubic':
+        cs = CubicSpline(x=p_levels.detach().numpy(), y=Yq.detach().numpy())
         Y_sample_np = cs(u_sample.detach().numpy())
         Y_sample = torch.tensor(Y_sample_np, dtype=torch.float32)
     else:
@@ -136,7 +159,7 @@ def validate_qq_model(base_dist: torch.distributions.Distribution,
         # validate the reconstruction process
         if isinstance(target_dist, torch.distributions.MultivariateNormal):
             Y_comp_qinv_sample = torch.stack([
-                uv_sample(Yq=Yq_pred[:, i].reshape(-1), N=N, u_levels=p_levels, u_step=p_step, interp='cubic')
+                uv_sample(Yq=Yq_pred[:, i].reshape(-1), N=N, p_levels=p_levels, p_step=p_step, interp='cubic')
                 for i in range(D)]).T.type(torch_dtype).to(torch_device)
             # FIXME remove : set of debug vars
             # Y_comp_qinv_sample = Y_comp_qinv_sample - torch.mean(Y_comp_qinv_sample, dim=0)  # fixme: quick fix
@@ -243,7 +266,7 @@ def run_tt_als(x: torch.Tensor, y: torch.Tensor, ETT_fits: List[Extended_TensorT
     # order = len(degrees)  # not used, but for debugging only
     # domain = [domain_stripe for _ in range(Dx_aug)]
     # op = orthopoly(degrees, domain, device=x_device)
-    x_domain_adjusted = domain_adjust(x=x, domain_stripe=domain_stripe)
+    x_domain_adjusted = x  # domain_adjust(x=x, domain_stripe=domain_stripe)
     is_domain_adjusted(x=x_domain_adjusted, domain_stripe=domain_stripe)
     assert len(ETT_fits) == Dy, "len(ETT_fits) must be equal to Dy"
     for i, ETT_fit in enumerate(ETT_fits):
@@ -367,8 +390,8 @@ def ETT_fits_predict(ETT_fits: List[Extended_TensorTrain], x: torch.Tensor,
     # else:
     #     x_device = torch.device('cpu')
 
-    x_domain_adjusted = domain_adjust(x=x, domain_stripe=domain_stripe)
-    assert is_domain_adjusted(x=x_domain_adjusted, domain_stripe=domain_stripe)
+    x_domain_adjusted = x  # domain_adjust(x=x, domain_stripe=domain_stripe)
+    # assert is_domain_adjusted(x=x_domain_adjusted, domain_stripe=domain_stripe)
     for d, ETT in enumerate(ETT_fits):
         assert ETT.d == Dx
 

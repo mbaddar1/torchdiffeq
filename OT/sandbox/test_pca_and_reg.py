@@ -89,7 +89,7 @@ if __name__ == '__main__':
     # FIXME , it relies implicitly on the latest batch
     Y_indep_comp_q_pred_test = model(Y_indep_comp_q)
     Y_indep_comp_qinv_sample = torch.stack([
-        uv_sample(Yq=Y_indep_comp_q_pred_test[:, i].reshape(-1), N=batch_size, u_levels=p_levels, u_step=p_step,
+        uv_sample(Yq=Y_indep_comp_q_pred_test[:, i].reshape(-1), N=batch_size, p_levels=p_levels, p_step=p_step,
                   interp='cubic')
         for i in range(D)]).T.type(torch_dtype)
     print(f'Mean Y_indep_comp_qinv_sample = {torch.mean(Y_indep_comp_qinv_sample, dim=0)}')
@@ -155,7 +155,7 @@ if __name__ == '__main__':
     Yq_indepcomp_outofsample_pred = model(Yq_indepcomp_outofsample)
     Y_out_of_sample_indep_comp_qinv_pred = torch.stack([
         uv_sample(Yq=Yq_indepcomp_outofsample_pred[:, j].reshape(-1), N=batch_size,
-                  u_levels=p_levels, u_step=p_step, interp='cubic') for j in
+                  p_levels=p_levels, p_step=p_step, interp='cubic') for j in
         range(D)]).type(torch_dtype).T
     # FIXME : Hack
     # Y_out_of_sample_indep_comp_qinv_pred = torch.tensor(

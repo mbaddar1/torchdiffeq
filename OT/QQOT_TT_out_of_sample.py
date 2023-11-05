@@ -16,8 +16,10 @@ from OT.utils import wasserstein_distance_two_gaussians, get_ETTs, run_tt_als, E
 # https://www.residentmar.io/2016/07/08/randomly-popular.html
 
 # https://prime-numbers.fandom.com/wiki/Category:4-Digit_Prime_Numbers
-SEEDS = [42, 100003, 100005]
-SEED = 100005
+SEEDS = [42, 100003, 100005,100013]
+N_SEEDS = len(SEEDS)
+SEED_IDX = np.random.randint(low=0,high=N_SEEDS-1)
+SEED = SEEDS[SEED_IDX]
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
@@ -40,7 +42,7 @@ if __name__ == '__main__':
     torch_dtype = torch.float64
     torch_device = torch.device('cpu')
     adjust_domain_flag = False
-    max_tt_als_itr = 200
+    max_tt_als_itr = 10
     #
     base_dist = torch.distributions.MultivariateNormal(
         loc=torch.distributions.Uniform(-0.05, 0.05).sample(torch.Size([D])).type(torch_dtype).to(torch_device),
@@ -53,7 +55,7 @@ if __name__ == '__main__':
 
     # Get training and test Data
     data_size = 4096
-    num_batches_train = 8
+    num_batches_train = 10
     num_p_levels = int(1e3)
     train_transformer = IncrementalPCA(whiten=True)
     test_transformer = IncrementalPCA(whiten=True)
@@ -65,7 +67,7 @@ if __name__ == '__main__':
                                      num_p_levels=num_p_levels * 10,
                                      torch_dtype=torch_dtype, torch_device=torch_device, data_size=data_size)
     # Modeling
-    model = get_ETTs(D_in=D + 1, D_out=D, rank=4, domain_stripe=[-5, 5], poly_degree=6, device=torch_device)
+    model = get_ETTs(D_in=D + 1, D_out=D, rank=4, domain_stripe=[-5, 5], poly_degree=7, device=torch_device)
     start_time = datetime.datetime.now()
     run_tt_als(x=Xq_train, y=Yq_train, ETT_fits=model, test_ratio=0.2, tol=1e-6, domain_stripe=[-1, 1],
                max_iter=max_tt_als_itr, regularization_coeff=float(1e-2), adjust_domain_flag=adjust_domain_flag)
@@ -84,6 +86,13 @@ if __name__ == '__main__':
     cov_recons = torch.cov(Y_recons.T)
     wd = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=mean_recons, C1=target_dist.covariance_matrix,
                                             C2=cov_recons)
-    print(f'training time = {(end_time - start_time).seconds}')
+    print(f'training time = {(end_time - start_time).seconds} seconds')
     print(f'wd = {wd}')
     print(f'mvn-hz = {pg.multivariate_normality(X=Y_recons.detach().numpy())}')
+    # benchmark
+    Y_test = target_dist.sample(torch.Size([test_sample_size]))
+    wd_benchmark = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=torch.mean(Y_test, dim=0),
+                                                      C1=target_dist.covariance_matrix, C2=torch.cov(Y_test.T))
+    mvn_hz_benchmark = pg.multivariate_normality(X=Y_test.detach().numpy())
+    print(f'mvn_hz_benchmark = {mvn_hz_benchmark}')
+    print(f'wd_benchmark = {wd_benchmark}')

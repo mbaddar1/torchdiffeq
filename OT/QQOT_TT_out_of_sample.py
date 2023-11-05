@@ -87,8 +87,8 @@ if __name__ == '__main__':
     wd = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=mean_recons, C1=target_dist.covariance_matrix,
                                             C2=cov_recons)
     print(f'training time = {(end_time - start_time).seconds} seconds')
-    print(f'wd = {wd}')
-    print(f'mvn-hz = {pg.multivariate_normality(X=Y_recons.detach().numpy())}')
+    print(f'wd reconstruct = {wd}')
+    print(f'mvn-hz reconstruct = {pg.multivariate_normality(X=Y_recons.detach().numpy())}')
     # benchmark
     Y_test = target_dist.sample(torch.Size([test_sample_size]))
     wd_benchmark = wasserstein_distance_two_gaussians(m1=target_dist.mean, m2=torch.mean(Y_test, dim=0),

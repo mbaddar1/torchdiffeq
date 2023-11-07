@@ -31,14 +31,14 @@ if __name__ == '__main__':
     2. Experiment 2 -> validate visually
     3. Validate 1 and 2 via sink-horn -> David
     """
-    N = 1000
+    N = 2000
     factor = 0.3
     noise = 0.05
     random_state = 0
     shuffle = True
-    dataset = "mvn2d"
-    transformer_class = "ica"
-    kernel = 'rbf'
+    dataset = "circles"
+    transformer_class = "kernel_pca"
+    # kernel = 'rbf'
 
     # dataset
     print(f'Building dataset : {dataset}')
@@ -48,7 +48,7 @@ if __name__ == '__main__':
         X, y = make_moons(n_samples=N, noise=noise, random_state=random_state, shuffle=shuffle)
     elif dataset == 'mvn2d':
         A = torch.tensor([[-5, 30.0], [0.0, -10.0]])
-        cov_mtx = torch.matmul(A,A.T)
+        cov_mtx = torch.matmul(A, A.T)
         X = torch.distributions.MultivariateNormal(loc=torch.tensor([-1.0, 1]), covariance_matrix=cov_mtx).sample(
             torch.Size([N])).detach().numpy()
         y = torch.zeros(torch.Size([N])).detach().numpy()
@@ -66,7 +66,9 @@ if __name__ == '__main__':
     if transformer_class == 'pca':
         transformer = PCA(whiten=True)
     elif transformer_class == 'kernel_pca':
-        transformer = KernelPCA(kernel=kernel, n_components=2, fit_inverse_transform=True)
+        transformer = KernelPCA(
+            n_components=3, kernel="rbf", gamma=2, fit_inverse_transform=True, alpha=0.5
+        )
     elif transformer_class == 'ica':
         transformer = FastICA()
     else:
@@ -81,7 +83,7 @@ if __name__ == '__main__':
     # plot components
     print(f'Plotting components')
     fig, (orig_data_ax, comp_proj_ax) = plt.subplots(
-        ncols=2, figsize=(10, 4)
+        ncols=2, figsize=(10, 10)
     )
 
     orig_data_ax.scatter(X_test[:, 0], X_test[:, 1], c=y_test)
@@ -118,6 +120,7 @@ if __name__ == '__main__':
     print(f'Finished Reconstructing')
     print(f'Finished Experiment 1')
     print('---')
+    sys.exit(-1)
     """
     Experiment 2 : 
     Y-> Y_ic (indeop comp) 
@@ -138,11 +141,12 @@ if __name__ == '__main__':
     X_ic_qinv = torch.stack([
         uv_sample(Yq=X_train_icq[:, d].reshape(-1), N=N, p_levels=p_values,
                   interp='cubic') for d in range(2)]).T
-    m0 = np.cov(X_train.T)
-    m1 = torch.mean(torch.tensor(train_comps), dim=0)
-    m2 = torch.mean(torch.tensor(X_ic_qinv), dim=0)
-    c1 = torch.cov(torch.tensor(train_comps).T)
-    c2 = torch.cov(torch.tensor(X_ic_qinv).T)
+
+    # m0 = np.cov(X_train.T)
+    # m1 = torch.mean(torch.tensor(train_comps), dim=0)
+    # m2 = torch.mean(torch.tensor(X_ic_qinv), dim=0)
+    # c1 = torch.cov(torch.tensor(train_comps).T)
+    # c2 = torch.cov(torch.tensor(X_ic_qinv).T)
     X_icq_recons = transformer.inverse_transform(X_ic_qinv.detach().numpy())
 
     fig, (orig_data_ax, comp_qinv) = plt.subplots(

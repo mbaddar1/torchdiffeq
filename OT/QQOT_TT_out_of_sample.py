@@ -42,12 +42,13 @@ if __name__ == '__main__':
     torch_dtype = torch.float64
     torch_device = torch.device('cpu')
     adjust_domain_flag = False
-    max_tt_als_itr = 10
+    max_tt_als_itr = 1
     #
     base_dist = torch.distributions.MultivariateNormal(
         loc=torch.distributions.Uniform(-0.05, 0.05).sample(torch.Size([D])).type(torch_dtype).to(torch_device),
         covariance_matrix=torch.diag(
             torch.distributions.Uniform(0.1, 0.5).sample(torch.Size([D])).type(torch_dtype).to(torch_device)))
+    print(f'base dist = {base_dist}')
     target_dist_mean = torch.distributions.Uniform(-10, 10).sample(torch.Size([D])).type(torch_dtype).to(torch_device)
     A = torch.distributions.Uniform(-5.0, 5.0).sample(torch.Size([D, D])).type(torch_dtype).to(torch_device)
     target_dist_cov = torch.matmul(A, A.T)
@@ -96,3 +97,7 @@ if __name__ == '__main__':
     mvn_hz_benchmark = pg.multivariate_normality(X=Y_test.detach().numpy())
     print(f'mvn_hz_benchmark = {mvn_hz_benchmark}')
     print(f'wd_benchmark = {wd_benchmark}')
+    """
+    https://pingouin-stats.org/build/html/generated/pingouin.multivariate_normality.html
+    
+    """

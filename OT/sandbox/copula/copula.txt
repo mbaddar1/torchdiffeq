@@ -1,0 +1,67 @@
+Refs
+
+Copula Basics
+https://www.cs.ubc.ca/labs/lci/mlrg/slides/GaussianCopula_GraphicalModels.pdf
+
+Copula Flows
+COPULA FLOWS FOR SYNTHETIC DATA GENERATION
+https://arxiv.org/pdf/2101.00598.pdf
+
+Copula Auto-Encoder
+Copulas as High-Dimensional Generative Models
+https://arxiv.org/pdf/1906.05423.pdf
+
+Vine Copula Autoencoders
+https://arxiv.org/pdf/1906.05423.pdf
+KDE for Marginals
+
+
+Deep Generative Quantile-Copula Models for Probabilistic Forecasting
+https://arxiv.org/pdf/1907.10697.pdf
+----
+>>>>>>Independence between Copula and Margins<<<<<
+https://stats.stackexchange.com/a/304057
+https://stats.stackexchange.com/a/423189
+https://stats.stackexchange.com/a/423189
+https://stats.stackexchange.com/questions/352144/if-margins-are-normal-then-why-we-need-to-transform-to-uniform-in-copula-model
+https://stats.stackexchange.com/questions/359839/copula-and-non-copula-models
+
+** Copula Generative Models
+1) Implicit Generative Copulas
+https://arxiv.org/pdf/2109.14567.pdf
+Used Empirical CDFs for Marginal
+
+
+
+2) QQ-Regression
+https://www.sciencedirect.com/science/article/abs/pii/S1057521916301272
+
+
+3) General Copula Articles
+https://medium.com/kxytechnologies/a-primer-on-copulas-from-a-machine-learning-perspective-b9ea11c8681b
+
+4) Copula Regression
+Estimation of Marginals
+https://mediatum.ub.tum.de/doc/1360907/766045.pdf
+
+
+5) Copula-Quantile Generative Model
+https://arxiv.org/pdf/1907.10697.pdf
+
+6) Quantile Approximation
+https://iopscience.iop.org/article/10.1088/1742-6596/1925/1/012034/pdf
+https://www.tandfonline.com/doi/full/10.1080/10618600.2021.1909601 (NN)
+
+7) Convex Quantile Regression
+https://pystoned.readthedocs.io/en/latest/examples/quantile/cqr.html
+
+8) Marginal Quantile regression and Copula
+Quantile regression via the EM algorithm for joint modeling of mixed discrete and continuous data based on Gaussian copula
+https://link.springer.com/article/10.1007/s10260-022-00629-2
+
+9)Non-Gaussian Margin with Gaussian Copula
+Dynamic Copula Quantile Regressions and Tail Area
+Dynamic Dependence in Forex Markets
+
+10) Gaussian Mixture Copula
+https://arxiv.org/pdf/2305.01479.pdf
